@@ -1,0 +1,42 @@
+# ── secrets ─────────────────────────────────────────
+.env
+.env.*
+!.env.example
+docker/.env
+*.session
+*.session-journal
+
+# ── runtime state (restored from private archive) ────
+journal/*
+!journal/.gitkeep
+runtime/*
+!runtime/.gitkeep
+runtime/state/*
+!runtime/state/.gitkeep
+runtime/logs/*
+!runtime/logs/.gitkeep
+runtime/whales/*
+!runtime/whales/.gitkeep
+runtime/revo/*
+!runtime/revo/.gitkeep
+!runtime/revo/binance_top100.txt
+!runtime/revo/bybit_all_691.txt
+!runtime/revo/canonical_universe.txt
+
+# ── backups / archives (never commit) ───────────────
+backups/
+*.dump
+*.tar.gz
+.backup_stage_*/
+
+# ── build junk ──────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+node_modules/
+logs/
+data/
+*.db
+*.sqlite
+.pytest_cache/

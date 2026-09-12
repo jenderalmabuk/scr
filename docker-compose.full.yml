@@ -1,0 +1,961 @@
+# Nexus v2 — Docker Compose
+# TimescaleDB + FastAPI + Collectors + OI Rollup
+# Bots added in Phase 2
+
+services:
+  analyst_bot:
+    build:
+      context: ..
+      dockerfile: docker/bot/Dockerfile
+    image: nexus-bot:latest
+    container_name: nexus_analyst_bot
+    command: ["python", "-u", "-m", "analyst_bot.bot"]
+    environment:
+      NEXUS_API_URL: http://fastapi:8000
+      ANALYST_EXCHANGE: ${ANALYST_EXCHANGE:-binance}
+      ANALYST_MAX_AGE_S: ${ANALYST_MAX_AGE_S:-180}
+      ANALYST_TELEGRAM_BOT_TOKEN: ${ANALYST_TELEGRAM_BOT_TOKEN:-}
+      ANALYST_TELEGRAM_ALLOWED_CHAT_IDS: ${ANALYST_TELEGRAM_ALLOWED_CHAT_IDS:-}
+      WHALE_RUNTIME_DIR: /app/runtime/whales
+      NINE_ROUTER_BASE: ${NINE_ROUTER_BASE}
+      NINE_ROUTER_API_KEY: ${NINE_ROUTER_API_KEY}
+      ADVERSARIAL_MODEL: ${ADVERSARIAL_MODEL:-Free-Tiers}
+    volumes:
+      - ../runtime/whales:/app/runtime/whales:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["analyst"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # ============================================================
+  # TimescaleDB — all market data
+  # ============================================================
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: nexus_timescaledb
+    environment:
+      POSTGRES_DB: nexus
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: ${NEXUS_DB_PASSWORD:?NEXUS_DB_PASSWORD is required (no default)}
+    ports:
+      - "127.0.0.1:5432:5432"  # never expose Postgres beyond the host
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================================
+  # FastAPI — REST query server
+  # ============================================================
+  fastapi:
+    build:
+      context: ..
+      dockerfile: docker/fastapi/Dockerfile
+    container_name: nexus_fastapi
+    environment:
+      DATABASE_URL: postgresql://nexus:${NEXUS_DB_PASSWORD:?NEXUS_DB_PASSWORD is required (no default)}@timescaledb:5432/nexus
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================
+  # Binance Collector — klines + OI + proxy CVD
+  # ============================================================
+  binance_collector:
+    build:
+      context: ..
+      dockerfile: docker/collector/Dockerfile
+    container_name: nexus_binance_collector
+    environment:
+      DATABASE_URL: postgresql://nexus:${NEXUS_DB_PASSWORD:?NEXUS_DB_PASSWORD is required (no default)}@timescaledb:5432/nexus
+      BINANCE_API_KEY: ${BINANCE_API_KEY}
+      BINANCE_SECRET: ${BINANCE_SECRET}
+      COLLECTOR_MODE: binance
+      UNIVERSE_FILE: /app/runtime/revo/binance_top100.txt
+      # Incremental closed-candle refresh. Scheduler only requests TFs due for a
+      # new candle; three rows cover boundary timing/exchange revisions.
+      KLINE_LIMIT: "3"
+    volumes:
+      - ../runtime/revo:/app/runtime/revo:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================
+  # Bybit Collector — klines + real OI + real CVD + funding
+  # ============================================================
+  bybit_collector:
+    build:
+      context: ..
+      dockerfile: docker/collector/Dockerfile
+    container_name: nexus_bybit_collector
+    environment:
+      DATABASE_URL: postgresql://nexus:${NEXUS_DB_PASSWORD:?NEXUS_DB_PASSWORD is required (no default)}@timescaledb:5432/nexus
+      BYBIT_API_KEY: ${BYBIT_API_KEY:-}
+      BYBIT_SECRET: ${BYBIT_SECRET:-}
+      COLLECTOR_MODE: bybit
+      UNIVERSE_FILE: /app/runtime/revo/bybit_all_691.txt
+    volumes:
+      - ../runtime/revo:/app/runtime/revo:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================
+  # OI Rollup — aggregate 5m → 1h/4h every hour
+  # ============================================================
+  oi_rollup:
+    build:
+      context: ..
+      dockerfile: docker/collector/Dockerfile
+    container_name: nexus_oi_rollup
+    command: ["python", "-u", "-m", "collector"]
+    environment:
+      DATABASE_URL: postgresql://nexus:${NEXUS_DB_PASSWORD:?NEXUS_DB_PASSWORD is required (no default)}@timescaledb:5432/nexus
+      COLLECTOR_MODE: oi_rollup
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================
+  # M30 Bot — consumes Nexus FastAPI, dry/paper by default
+  # ============================================================
+  m30_imbalance:
+    image: nexus-bot:latest
+    container_name: nexus_m30_imbalance
+    environment:
+      BOT_NAME: m30_imbalance
+      PYTHONUNBUFFERED: "1"
+      NEXUS_API_URL: http://fastapi:8000
+      STATE_DIR: /state
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      HEARTBEAT_DIR: /state
+      NINE_ROUTER_API_KEY: ${NINE_ROUTER_API_KEY}
+      NINE_ROUTER_BASE: ${NINE_ROUTER_BASE:-http://host.docker.internal:20128/v1}
+      ADVERSARIAL_MODEL: ${ADVERSARIAL_MODEL:-Free-Tiers}
+      ADVERSARIAL_MODEL_FALLBACK: ${ADVERSARIAL_MODEL_FALLBACK:-cerebras/gpt-oss-120b}
+      ADVERSARIAL_VERSION: ${ADVERSARIAL_VERSION:-v2}
+      ADVERSARIAL_JUDGE_MODEL: ${ADVERSARIAL_JUDGE_MODEL:-Free-Tiers}
+      ADVERSARIAL_MODEL_POOL: ${ADVERSARIAL_MODEL_POOL:-}
+      ADVERSARIAL_TIER1_POOL: ${ADVERSARIAL_TIER1_POOL:-}
+      WHALE_RUNTIME_DIR: /app/runtime/whales
+      LOG_DIR: /tmp
+    volumes:
+      - ../runtime/state:/state
+      - ../runtime/logs:/logs
+      - ../runtime/whales:/app/runtime/whales
+      - ../runtime/revo:/app/runtime/revo:ro
+      - ../bots/config.yaml:/app/bots/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # ============================================================
+  # H1 Bot — consumes Nexus FastAPI, dry/paper by default
+  # ============================================================
+  h1_imbalance:
+    image: nexus-bot:latest
+    container_name: nexus_h1_imbalance
+    environment:
+      BOT_NAME: h1_imbalance
+      PYTHONUNBUFFERED: "1"
+      NEXUS_API_URL: http://fastapi:8000
+      STATE_DIR: /state
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      HEARTBEAT_DIR: /state
+      NINE_ROUTER_API_KEY: ${NINE_ROUTER_API_KEY}
+      NINE_ROUTER_BASE: ${NINE_ROUTER_BASE:-http://host.docker.internal:20128/v1}
+      ADVERSARIAL_MODEL: ${ADVERSARIAL_MODEL:-Free-Tiers}
+      ADVERSARIAL_MODEL_FALLBACK: ${ADVERSARIAL_MODEL_FALLBACK:-cerebras/gpt-oss-120b}
+      ADVERSARIAL_VERSION: ${ADVERSARIAL_VERSION:-v2}
+      ADVERSARIAL_JUDGE_MODEL: ${ADVERSARIAL_JUDGE_MODEL:-Free-Tiers}
+      ADVERSARIAL_MODEL_POOL: ${ADVERSARIAL_MODEL_POOL:-}
+      ADVERSARIAL_TIER1_POOL: ${ADVERSARIAL_TIER1_POOL:-}
+      WHALE_RUNTIME_DIR: /app/runtime/whales
+      LOG_DIR: /tmp
+    volumes:
+      - ../runtime/state:/state
+      - ../runtime/logs:/logs
+      - ../runtime/whales:/app/runtime/whales
+      - ../runtime/revo:/app/runtime/revo:ro
+      - ../bots/config.yaml:/app/bots/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # H1 short-only candidate — isolated treatment arm for direction A/B test.
+  h1_short_candidate:
+    image: nexus-bot:latest
+    container_name: nexus_h1_short_candidate
+    environment:
+      BOT_NAME: h1_short_candidate
+      PYTHONUNBUFFERED: "1"
+      NEXUS_API_URL: http://fastapi:8000
+      STATE_DIR: /state
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      HEARTBEAT_DIR: /state
+      NINE_ROUTER_API_KEY: ${NINE_ROUTER_API_KEY}
+      NINE_ROUTER_BASE: ${NINE_ROUTER_BASE:-http://host.docker.internal:20128/v1}
+      ADVERSARIAL_MODEL: ${ADVERSARIAL_MODEL:-Free-Tiers}
+      ADVERSARIAL_MODEL_FALLBACK: ${ADVERSARIAL_MODEL_FALLBACK:-cerebras/gpt-oss-120b}
+      ADVERSARIAL_VERSION: ${ADVERSARIAL_VERSION:-v2}
+      ADVERSARIAL_JUDGE_MODEL: ${ADVERSARIAL_JUDGE_MODEL:-Free-Tiers}
+      ADVERSARIAL_MODEL_POOL: ${ADVERSARIAL_MODEL_POOL:-}
+      ADVERSARIAL_TIER1_POOL: ${ADVERSARIAL_TIER1_POOL:-}
+      WHALE_RUNTIME_DIR: /app/runtime/whales
+      LOG_DIR: /tmp
+    volumes:
+      - ../runtime/state:/state
+      - ../runtime/logs:/logs
+      - ../runtime/whales:/app/runtime/whales
+      - ../runtime/revo:/app/runtime/revo:ro
+      - ../bots/config.yaml:/app/bots/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # ============================================================
+  # Full-wick H1→M5 paper experiment — isolated, simulated only
+  # ============================================================
+  fullwick_volume_paper:
+    image: nexus-bot:latest
+    container_name: nexus_fullwick_volume_paper
+    command: ["python", "-u", "fusionnew/paper_fullwick.py", "--pairs-file", "/paper/canonical_universe_all.txt", "--state-dir", "/state", "--cycle-sec", "300"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app:/app/fusionnew
+      LOG_DIR: /tmp
+      PAPER_ARM: FULLWICK_VOLUME
+      PAPER_TELEGRAM_BOT_TOKEN: ${FULLWICK_VOLUME_TELEGRAM_BOT_TOKEN}
+      PAPER_TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+    volumes:
+      - ../fusionnew:/app/fusionnew:ro
+      - ../runtime/imbalance/canonical_universe_all.txt:/paper/canonical_universe_all.txt:ro
+      - ../runtime/imbalance/fullwick_paper:/state
+    restart: unless-stopped
+    profiles: ["paper-fullwick"]
+    networks: [nexus_net, docker_default]
+
+  fullwick_oi_paper:
+    image: nexus-bot:latest
+    container_name: nexus_fullwick_oi_paper
+    command: ["python", "-u", "fusionnew/paper_fullwick.py", "--pairs-file", "/paper/canonical_universe_all.txt", "--state-dir", "/state", "--cycle-sec", "300", "--oi-gate"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app:/app/fusionnew
+      LOG_DIR: /tmp
+      PAPER_ARM: FULLWICK_VOLUME_OI
+      PAPER_TELEGRAM_BOT_TOKEN: ${FULLWICK_OI_TELEGRAM_BOT_TOKEN}
+      PAPER_TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+    volumes:
+      - ../fusionnew:/app/fusionnew:ro
+      - ../runtime/imbalance/canonical_universe_all.txt:/paper/canonical_universe_all.txt:ro
+      - ../runtime/imbalance/fullwick_oi_paper:/state
+    restart: unless-stopped
+    profiles: ["paper-fullwick"]
+    networks: [nexus_net, docker_default]
+
+  fullwick_dynamic_paper:
+    image: nexus-bot:latest
+    container_name: nexus_fullwick_dynamic_paper
+    command: ["python", "-u", "fusionnew/paper_fullwick.py", "--pairs-file", "/paper/canonical_universe_all.txt", "--state-dir", "/state", "--cycle-sec", "300", "--tp-mode", "dynamic"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app:/app/fusionnew
+      LOG_DIR: /tmp
+      PAPER_ARM: FULLWICK_DYNAMIC
+      PAPER_TELEGRAM_BOT_TOKEN: ${FULLWICK_DYNAMIC_TELEGRAM_BOT_TOKEN}
+      PAPER_TELEGRAM_CHAT_ID: ${FULLWICK_DYNAMIC_TELEGRAM_CHAT_ID}
+    volumes:
+      - ../fusionnew:/app/fusionnew:ro
+      - ../runtime/imbalance/canonical_universe_all.txt:/paper/canonical_universe_all.txt:ro
+      - ../runtime/imbalance/fullwick_dynamic_paper:/state
+    restart: unless-stopped
+    profiles: ["paper-fullwick"]
+    networks: [nexus_net, docker_default]
+
+  # ============================================================
+  # Nexus Scanner — writes Revo-compatible JSON runtime files
+  # ============================================================
+  nexus_scanner:
+    build:
+      context: ..
+      dockerfile: docker/bot/Dockerfile
+    container_name: nexus_scanner
+    environment:
+      NEXUS_API_URL: http://fastapi:8000
+      REVO_RUNTIME_DIR: /runtime/revo
+      REVO_TOP_N: "347"
+      REVO_MIN_VOLUME: "600000"
+      REVO_SCANNER_INTERVAL: "300"
+    volumes:
+      - ../runtime/revo:/runtime/revo
+    restart: unless-stopped
+    command: ["python", "-u", "bots/nexus_scanner.py"]
+    depends_on:
+      fastapi:
+        condition: service_started
+    profiles: ["bots"]
+
+  # ============================================================
+  # Revo Adaptive — Freqtrade with Nexus integration
+  # ============================================================
+  revo_adaptive:
+    image: freqtradeorg/freqtrade:stable
+    container_name: revo_adaptive_signal_bybit_paper
+    user: ftuser
+    environment:
+      - FREQTRADE__CONFIG=/freqtrade/configs/config.bybit.paper.runtime.json
+      - FREQTRADE__STRATEGY=RevoAdaptiveStrategy
+      - FREQTRADE__TELEGRAM__TOKEN=${REVO_TELEGRAM_BOT_TOKEN}
+      - FREQTRADE__TELEGRAM__CHAT_ID=${TELEGRAM_CHAT_ID}
+      # MIN_SCORE=9: empirically validated (2026-07-14 sweep, 40d/93pair 20260601-20260710).
+      # STAGE-1 sweep: MS=9 is the profit inflection (PF 0.977@8 -> 1.257@9, net -27 -> +158,
+      # DD 14.8% -> 7.4%). MS<=8 all net-negative. Forward-live 53 trades confirmed: score
+      # 6/7 band = 6-14% WR bleeding (-22.86), score 8+ = breakeven-positive.
+      # OLD "live7≈bt9 (proxy +3)" assumption DISPROVEN: backtest-7 itself loses -175.
+      # STAGE-2 grid @ MS=9 confirmed disc=3.5/rsi=40 is best risk-adj (net/DD 31.4, PF 1.495, DD 5.5%).
+      - REVO_ENTRY_MIN_SCORE=9
+      - REVO_ENTRY_DISCOUNT_MIN_PCT=3.5
+      - REVO_ENTRY_RSI_MAX=40
+      # Falling-knife floor: reject entries deeper than 6% below EMA55 (crash, not
+      # pullback). Tightened 9->6 on 2026-07-22 gate-rebalance backtest (Jun1-Jul10,
+      # 91 pairs): knife_only drops only ~5 entries (193->188) while PF stays 1.23
+      # and PnL stays positive -> near-free quality gain. Widening disc_MIN was
+      # REJECTED (PF 1.27->0.99, PnL negative). Funding-z gate REJECTED (would cut
+      # 31% of entries per audit, only 1% are truly crowded).
+      - REVO_ENTRY_DISCOUNT_MAX_PCT=6
+      # Same-pair LOSS cooldown: block re-entry on a pair that closed at a loss
+      # within 12h. Replaces the removed dynamic-blacklist cron. 0 disables.
+      - REVO_LOSS_COOLDOWN_HOURS=12
+      # Bybit median qvol verified 2026-07-18: mid-cap altcoins ~15k-176k
+      # vs Binance ~167k-986k (esports 4x, 1000xec 21x). 200k calibrated to
+      # Binance backtest — too strict for Bybit universe. Lowered to 50k.
+      - REVO_MIN_QVOL_5M=50000
+      - REVO_LIQ_MODE=med48
+      - REVO_PAIR_BLACKLIST_PATH=/freqtrade/user_data/local/revo_pair_blacklist.json
+      - REVO_BLACKLIST_LOSS_STREAK=3
+      - REVO_BLACKLIST_TOTAL_LOSSES=4
+      - REVO_BLACKLIST_NET_LOSS=-3.0
+      - REVO_BLACKLIST_COOLDOWN_HOURS=72
+      - REVO_BLACKLIST_LONG_COOLDOWN_HOURS=168
+      - REVO_BLACKLIST_PERM_LOSSES=6
+      - REVO_BLACKLIST_PERM_NET=-5.0
+      - REVO_BLACKLIST_BYPASS_SCORE=10
+      - REVO_BLACKLIST_BYPASS_RSI=30
+      - REVO_ER_CHOP_MAX=0.15
+      - REVO_ATR_PCT_MAX=4.0
+      - REVO_FLOW_MAX_AGE_SEC=660
+      - REVO_FLOW_CONTEXT_PATH=/freqtrade/user_data/local/revo_alpha/runtime/bybit/revo_flow_context.json
+      - REVO_ENTRY_AUDIT_PATH=/freqtrade/user_data/local/revo_entry_audit.jsonl
+      # Flow-gate A/B (2026-07-23): adaptive runs SOFT scoring gate (flow dir = +/-2
+      # score, min_score+1, veto only heavy distribution). Backtest shows edge is
+      # reversion-based and independent of flow gate; this frees throughput while
+      # keeping a quality bar. Set to "hard" to revert to continuation-only control.
+      - REVO_FLOW_GATE_MODE=scoring
+    volumes:
+      - ../revo_adaptive/strategies:/freqtrade/user_data/strategies
+      - ../revo_adaptive/configs:/freqtrade/user_data/configs
+      - ../revo_adaptive/scripts:/freqtrade/user_data/scripts
+      - ../revo_adaptive/revo_core:/freqtrade/user_data/revo_core
+      - ../revo_adaptive/user_data:/freqtrade/user_data
+      - ../runtime/revo:/freqtrade/user_data/local/revo_alpha/runtime/bybit
+      - ../runtime/revo:/freqtrade/user_data/revo_alpha/runtime/bybit
+    ports:
+      - "127.0.0.1:8081:8080"
+    restart: unless-stopped
+    command: ["trade", "--config", "/freqtrade/user_data/configs/config.bybit.paper.json", "--strategy", "RevoAdaptiveStrategy"]
+    depends_on:
+      fastapi:
+        condition: service_started
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # ============================================================
+  # Revo Auditable Core — 2nd paper bot, ISOLATED (does NOT touch revo_adaptive)
+  # Small auditable decision core (auditable_core/core.py). Separate DB, port,
+  # logfile; telegram OFF. Backtest Jun1-Jul10 @50k/med48/MS9: +4.87% PF 1.06
+  # (vs RevoAdaptive med48 +3.88%). Deployed 2026-07-20 for live paper evidence.
+  # ============================================================
+  revo_auditable_core:
+    image: freqtradeorg/freqtrade:stable
+    container_name: revo_auditable_core_bybit_paper
+    user: ftuser
+    environment:
+      - FREQTRADE__CONFIG=/freqtrade/user_data/configs/config.bybit.auditable.paper.json
+      - FREQTRADE__STRATEGY=RevoAuditableCoreStrategy
+      # Telegram: dedicated @fusionwhale_bot (bot_id 8989348027), SEPARATE from
+      # revo_adaptive's bot (8905893834). No polling clash (whale_report is send-only).
+      - FREQTRADE__TELEGRAM__ENABLED=true
+      - FREQTRADE__TELEGRAM__TOKEN=${FUSIONWHALE_BOT_TOKEN}
+      - FREQTRADE__TELEGRAM__CHAT_ID=${FUSIONWHALE_CHAT_ID}
+      - REVO_ENTRY_MIN_SCORE=9
+      - REVO_ENTRY_DISCOUNT_MIN_PCT=3.5
+      - REVO_ENTRY_RSI_MAX=40
+      # Falling-knife floor tightened 9->6 (see adaptive bot for backtest rationale).
+      - REVO_ENTRY_DISCOUNT_MAX_PCT=6
+      # Validated Revo stack: no same-pair loss cooldown; cooldown is not part of edge.
+      - REVO_LOSS_COOLDOWN_HOURS=0
+      - REVO_MIN_QVOL_5M=50000
+      - REVO_LIQ_MODE=med48
+      - REVO_PAIR_BLACKLIST_PATH=/freqtrade/user_data/local/revo_pair_blacklist.json
+      - REVO_ER_CHOP_MAX=0.15
+      - REVO_ATR_PCT_MAX=4.0
+      - REVO_EXIT_MODE=time_max
+      - REVO_MAX_HOLD_HOURS=4
+      - REVO_SL_MODE=atr3
+      - REVO_FLOW_MAX_AGE_SEC=660
+      - REVO_FLOW_CONTEXT_PATH=/freqtrade/user_data/local/revo_alpha/runtime/bybit/revo_flow_context.json
+      - REVO_ENTRY_AUDIT_PATH=/freqtrade/user_data/local/revo_auditable_entry_audit.jsonl
+      # Flow-gate A/B (2026-07-23): auditable runs BLOCK-DANGER gate (Opsi A) - no
+      # continuation requirement, veto ONLY heavy distribution (cvd_z < -1.5).
+      # This bot is the treatment arm vs adaptive's scoring gate. Set "hard" to revert.
+      - REVO_FLOW_GATE_MODE=block_danger
+    volumes:
+      - ../revo_adaptive/strategies:/freqtrade/user_data/strategies
+      - ../revo_adaptive/configs:/freqtrade/user_data/configs
+      - ../revo_adaptive/scripts:/freqtrade/user_data/scripts
+      - ../revo_adaptive/revo_core:/freqtrade/user_data/revo_core
+      - ../revo_adaptive/auditable_core:/freqtrade/auditable_core:ro
+      - ../revo_adaptive/user_data:/freqtrade/user_data
+      - ../runtime/revo:/freqtrade/user_data/local/revo_alpha/runtime/bybit
+      - ../runtime/revo:/freqtrade/user_data/revo_alpha/runtime/bybit
+    ports:
+      - "127.0.0.1:8082:8080"
+    restart: unless-stopped
+    command: ["trade", "--config", "/freqtrade/user_data/configs/config.bybit.auditable.paper.json", "--strategy", "RevoAuditableCoreStrategy"]
+    depends_on:
+      fastapi:
+        condition: service_started
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # ============================================================
+  # Revo Winner — 3rd paper bot, ISOLATED (does NOT touch revo_adaptive /
+  # revo_auditable_core). Runs the IS+OOS validated reversion config:
+  #   entry  score>=9, discount 3.5-6%, RSI<=40, atr_pct<=4, er_chop 0.15,
+  #          falling-knife veto, flow gate PURE (no flow filter)
+  #   exit   SL 3.0x ATR14, hard time stop 4h, ROI ladder disabled
+  # OOS Jun25-Jul10: 95 trades, WR 37.9%, PF 1.41, net +$22.88, DD 1.02%.
+  # Separate DB (tradesv3.winner.paper.sqlite), port 8083, own Telegram bot.
+  # Deployed 2026-07-28 for live paper evidence before any promotion.
+  # ============================================================
+  revo_winner:
+    image: freqtradeorg/freqtrade:stable
+    container_name: revo_winner_bybit_paper
+    user: ftuser
+    environment:
+      - FREQTRADE__CONFIG=/freqtrade/user_data/configs/config.bybit.winner.paper.json
+      - FREQTRADE__STRATEGY=RevoAdaptiveWinner
+      - FREQTRADE__TELEGRAM__ENABLED=true
+      - FREQTRADE__TELEGRAM__TOKEN=${REVO_WINNER_TELEGRAM_BOT_TOKEN}
+      - FREQTRADE__TELEGRAM__CHAT_ID=${TELEGRAM_CHAT_ID}
+      # Entry gates: identical to the validated grid (STAGE-2 @ MS=9).
+      - REVO_ENTRY_MIN_SCORE=9
+      - REVO_ENTRY_DISCOUNT_MIN_PCT=3.5
+      - REVO_ENTRY_RSI_MAX=40
+      - REVO_ENTRY_DISCOUNT_MAX_PCT=6
+      - REVO_ER_CHOP_MAX=0.15
+      - REVO_ATR_PCT_MAX=4.0
+      - REVO_MIN_QVOL_5M=50000
+      - REVO_LIQ_MODE=med48
+      # Flow gate PURE: ablation showed every flow variant had OOS PF < 1, and
+      # the edge is reversion-based, so no flow filter is applied here.
+      - REVO_FLOW_GATE_MODE=pure
+      # Exit thesis from the ablation winner.
+      - REVO_SL_ATR_MULT=3.0
+      - REVO_MAX_HOLD_HOURS=4
+      # No loss cooldown / pair blacklist so the paper run measures the raw config.
+      - REVO_LOSS_COOLDOWN_HOURS=0
+      - REVO_PAIR_BLACKLIST_PATH=/freqtrade/user_data/local/revo_winner_blacklist_absent.json
+      - REVO_FLOW_MAX_AGE_SEC=660
+      - REVO_FLOW_CONTEXT_PATH=/freqtrade/user_data/local/revo_alpha/runtime/bybit/revo_flow_context.json
+      - REVO_ENTRY_AUDIT_PATH=/freqtrade/user_data/local/revo_winner_entry_audit.jsonl
+    volumes:
+      - ../revo_adaptive/strategies:/freqtrade/user_data/strategies
+      - ../revo_adaptive/configs:/freqtrade/user_data/configs
+      - ../revo_adaptive/scripts:/freqtrade/user_data/scripts
+      - ../revo_adaptive/revo_core:/freqtrade/user_data/revo_core
+      - ../revo_adaptive/user_data:/freqtrade/user_data
+      - ../runtime/revo:/freqtrade/user_data/local/revo_alpha/runtime/bybit
+      - ../runtime/revo:/freqtrade/user_data/revo_alpha/runtime/bybit
+    ports:
+      - "127.0.0.1:8083:8080"
+    restart: unless-stopped
+    command: ["trade", "--config", "/freqtrade/user_data/configs/config.bybit.winner.paper.json", "--strategy", "RevoAdaptiveWinner"]
+    depends_on:
+      fastapi:
+        condition: service_started
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # ============================================================
+  # Whale Scanner — on-chain large transfer monitor (async 24/7)
+  # ============================================================
+  whalescanner:
+    build:
+      context: ..
+      dockerfile: docker/bot/Dockerfile
+    container_name: nexus_whalescanner
+    environment:
+      WHALE_RUNTIME_DIR: /app/runtime/whales
+    volumes:
+      - ../runtime/whales:/app/runtime/whales
+      - ../runtime/whales/token_chain_map.json:/app/runtime/whales/token_chain_map.json
+      - ../runtime/whales/exchange_labels.json:/app/runtime/whales/exchange_labels.json
+    restart: unless-stopped
+    command: ["python", "-u", "bots/whalescanner.py"]
+    # DISABLED 2026-07-20: superseded by HOST process (bots/whalescanner.py run
+    # manually on host, 7d uptime, actively producing). Container was OOM-killed
+    # (exit 137) 10d ago. Moved OFF the "bots" profile so `--profile bots up` will
+    # NOT auto-start it and clash with the running host process.
+    # To use the container version instead: stop the host process first, then run
+    #   docker compose --profile whalescanner-container up -d whalescanner
+    profiles: ["whalescanner-container"]
+    networks:
+      - docker_default
+
+  # ============================================================
+  # Signal Copy Pipeline — Telegram → Parse → Validate → Execute
+  # ============================================================
+  signal_copy:
+    build:
+      context: ..
+      dockerfile: docker/signal_copy/Dockerfile
+    container_name: nexus_signal_copy
+    environment:
+      PYTHONUNBUFFERED: "1"
+      NEXUS_API_URL: http://fastapi:8000
+      # Non-root user can't write /app/logs or /app/.config — redirect to writable /tmp
+      LOG_DIR: /tmp
+      MPLCONFIGDIR: /tmp/matplotlib
+      # Signal Copy specific
+      SIGNAL_COPY_TG_API_ID: ${TELEGRAM_API_ID}
+      SIGNAL_COPY_TG_API_HASH: ${TELEGRAM_API_HASH}
+      SIGNAL_COPY_TG_SESSION: ${TELEGRAM_SESSION_NAME:-signal_copy_session}
+      SIGNAL_COPY_TG_LISTENER_BOT_TOKEN: ${SIGNAL_COPY_TG_LISTENER_BOT_TOKEN}
+      SIGNAL_COPY_TG_CHANNELS: ${SIGNAL_COPY_TG_CHANNELS}
+      SIGNAL_COPY_CALIBRATION_CHANNELS: ${SIGNAL_COPY_CALIBRATION_CHANNELS}
+      # Per-channel pending-limit expiry profiles (Opsi A)
+      SIGNAL_COPY_EXPIRY_SCALP: ${SIGNAL_COPY_EXPIRY_SCALP:-2700}
+      SIGNAL_COPY_EXPIRY_STANDARD: ${SIGNAL_COPY_EXPIRY_STANDARD:-10800}
+      SIGNAL_COPY_EXPIRY_SWING: ${SIGNAL_COPY_EXPIRY_SWING:-64800}
+      # Max concurrent open positions (GLOBAL shared book). Raised 5->20 (2026-07-23).
+      MAX_OPEN_POS_GLOBAL: ${MAX_OPEN_POS_GLOBAL:-20}
+      SIGNAL_COPY_CHANNELS_SCALP: ${SIGNAL_COPY_CHANNELS_SCALP}
+      SIGNAL_COPY_CHANNELS_SWING: ${SIGNAL_COPY_CHANNELS_SWING}
+      # Per-channel vision routing (parser-only channels excluded)
+      SIGNAL_COPY_CHANNELS_VISION: ${SIGNAL_COPY_CHANNELS_VISION}
+      # Dual channel notifications (new format)
+      SIGNAL_COPY_PARSER_NOTIFY_BOT_TOKEN: ${SIGNAL_COPY_PARSER_NOTIFY_BOT_TOKEN}
+      SIGNAL_COPY_PARSER_NOTIFY_CHAT_ID: ${SIGNAL_COPY_PARSER_NOTIFY_CHAT_ID}
+      SIGNAL_COPY_TRADES_NOTIFY_BOT_TOKEN: ${SIGNAL_COPY_TRADES_NOTIFY_BOT_TOKEN}
+      SIGNAL_COPY_TRADES_NOTIFY_CHAT_ID: ${SIGNAL_COPY_TRADES_NOTIFY_CHAT_ID}
+      # Legacy confirm bot (deprecated - kept for backward compat)
+      SIGNAL_COPY_CONFIRM_BOT_TOKEN: ${SIGNAL_COPY_CONFIRM_BOT_TOKEN}
+      SIGNAL_COPY_CONFIRM_CHAT_ID: ${SIGNAL_COPY_CONFIRM_CHAT_ID}
+      # Behavior
+      SIGNAL_COPY_RISK_PCT: ${SIGNAL_COPY_RISK_PCT:-0.01}
+      SIGNAL_COPY_DRY_RUN: ${SIGNAL_COPY_DRY_RUN:-true}
+      SIGNAL_COPY_MAX_RUNNING_POSITIONS: ${SIGNAL_COPY_MAX_RUNNING_POSITIONS:-30}
+      SIGNAL_COPY_AUTO_EXECUTE: ${SIGNAL_COPY_AUTO_EXECUTE:-false}
+      # Execution Gateway: direct compose DNS avoids host loopback/publish path.
+      # Override GATEWAY_URL only when using an external/legacy gateway.
+      GATEWAY_URL: ${GATEWAY_URL:-http://gateway:8787/gateway}
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN}
+      SIGNAL_COPY_ADVERSARIAL_ENABLED: ${SIGNAL_COPY_ADVERSARIAL_ENABLED:-true}
+      SIGNAL_COPY_ADVERSARIAL_MODE: ${SIGNAL_COPY_ADVERSARIAL_MODE:-off}
+      # Adversarial bull/bear LLM gate — reach host proxy via host.docker.internal
+      NINE_ROUTER_API_KEY: ${NINE_ROUTER_API_KEY}
+      NINE_ROUTER_BASE: ${NINE_ROUTER_BASE:-http://host.docker.internal:20128/v1}
+      ADVERSARIAL_MODEL: ${ADVERSARIAL_MODEL:-Free-Tiers}
+      ADVERSARIAL_MODEL_FALLBACK: ${ADVERSARIAL_MODEL_FALLBACK:-Free-Tiers}
+      SIGNAL_COPY_PARSE_REPORT: ${SIGNAL_COPY_PARSE_REPORT:-false}
+      SIGNAL_COPY_NOTIFY_REJECTED: ${SIGNAL_COPY_NOTIFY_REJECTED:-true}
+      SIGNAL_COPY_NOTIFY_WEAK: ${SIGNAL_COPY_NOTIFY_WEAK:-true}
+      # Legacy validation mode (less strict, like old bot)
+      SIGNAL_COPY_LEGACY_VALIDATION: ${SIGNAL_COPY_LEGACY_VALIDATION:-false}
+      # Discord (optional)
+      SIGNAL_COPY_DISCORD_ENABLED: ${SIGNAL_COPY_DISCORD_ENABLED:-false}
+      SIGNAL_COPY_DISCORD_BOT_TOKEN: ${SIGNAL_COPY_DISCORD_BOT_TOKEN:-}
+      SIGNAL_COPY_DISCORD_CHANNELS: ${SIGNAL_COPY_DISCORD_CHANNELS:-}
+      # Vision (optional) — OpenAI-compatible backend (local proxy / OpenRouter / Gemini)
+      SIGNAL_COPY_VISION_ENABLED: ${SIGNAL_COPY_VISION_ENABLED:-false}
+      SIGNAL_COPY_VISION_BACKEND: ${SIGNAL_COPY_VISION_BACKEND:-openai}
+      # 127.0.0.1 inside a container is the container itself; reach the host proxy via host-gateway.
+      SIGNAL_COPY_VISION_OPENAI_BASE_URL: ${SIGNAL_COPY_VISION_OPENAI_BASE_URL:-http://host.docker.internal:20128/v1}
+      SIGNAL_COPY_VISION_OPENAI_API_KEY: ${SIGNAL_COPY_VISION_OPENAI_API_KEY}
+      SIGNAL_COPY_VISION_OPENAI_MODEL: ${SIGNAL_COPY_VISION_OPENAI_MODEL:-gc/gemini-2.5-pro}
+      SIGNAL_COPY_VISION_TIMEOUT_SEC: ${SIGNAL_COPY_VISION_TIMEOUT_SEC:-300}
+      # legacy ollama vars (kept for backward compat; unused by openai backend)
+      SIGNAL_COPY_OLLAMA_URL: ${SIGNAL_COPY_OLLAMA_URL:-http://host.docker.internal:11434}
+      SIGNAL_COPY_VISION_MODEL: ${SIGNAL_COPY_VISION_MODEL:-qwen2.5vl:3b}
+      # Pending-limit lifecycle journal (PENDING/FILLED/EXPIRED/DRIFT/REJECTED)
+      SIGNAL_COPY_PENDING_JOURNAL: /state/pending_lifecycle.jsonl
+      SIGNAL_COPY_CHANNEL_PERFORMANCE_STORE: /state/channel_performance.json
+      SIGNAL_COPY_OUTCOME_STORE: /state/signal_outcomes.json
+    volumes:
+      - ../runtime/state:/state
+      - ../runtime/logs:/logs
+      - ../runtime/whales:/app/runtime/whales
+      - ../runtime/revo:/app/runtime/revo:ro
+      - ../data:/app/data
+      - ../journal:/app/journal
+      - ../signal_copy_session.session:/app/signal_copy_session.session
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # ============================================================
+  # Execution Gateway — single exchange/paper execution point (:8787)
+  # Containerized replacement for the host systemd unit (fusion-gateway.service).
+  # Same image as the bots (gateway code is baked in); just a different command.
+  #  - user 1000:1000  -> journal/ is host-owned by uid 1000 (image nexus=999)
+  #  - PYTHONPATH=/app  -> avoid /app/fusionnew/utils shadowing /app/utils
+  #  - PAPER_NEXUS_API=fastapi:8000 -> host default localhost:8000 is wrong here
+  #  - publish 127.0.0.1:8787 -> bots keep reaching host.docker.internal:8787
+  # ============================================================
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/bot/Dockerfile
+    image: nexus-bot:latest
+    container_name: nexus_gateway
+    command: ["python", "-u", "-m", "uvicorn", "gateway.run_gateway:app", "--host", "0.0.0.0", "--port", "8787"]
+    user: "1000:1000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN}
+      GATEWAY_PAPER_MAINNET: ${GATEWAY_PAPER_MAINNET:-true}
+      PAPER_SAMPLE_IGNORE_MAX_DRAWDOWN: ${PAPER_SAMPLE_IGNORE_MAX_DRAWDOWN:-true}
+      STARTING_BALANCE: ${STARTING_BALANCE:-1000}
+      MAX_OPEN_POS_GLOBAL: ${MAX_OPEN_POS_GLOBAL:-20}
+      PAPER_MAX_RUNNING_POSITIONS: ${PAPER_MAX_RUNNING_POSITIONS:-30}
+      REAL_MAX_RUNNING_POSITIONS: ${REAL_MAX_RUNNING_POSITIONS:-20}
+      MAX_SAME_DIRECTION_POS: ${MAX_SAME_DIRECTION_POS:-0}
+      MAX_TOTAL_EXPOSURE_PCT: ${MAX_TOTAL_EXPOSURE_PCT:-100000.0}
+      MAX_GLOBAL_OPEN_RISK_PCT: ${MAX_GLOBAL_OPEN_RISK_PCT:-0.10}
+      PAPER_TAKER_FEE_PCT: ${PAPER_TAKER_FEE_PCT:-0.0005}
+      PAPER_SLIPPAGE_PCT: ${PAPER_SLIPPAGE_PCT:-0.0005}
+      SHADOW_TRAILING_ENABLED: ${SHADOW_TRAILING_ENABLED:-true}
+      SHADOW_TRAIL_MIN_PCT: ${SHADOW_TRAIL_MIN_PCT:-0.01}
+      SHADOW_TRAIL_ATR_MULTIPLIER: ${SHADOW_TRAIL_ATR_MULTIPLIER:-1.0}
+      SHADOW_TRAILING_JOURNAL: /app/journal/shadow_trailing.jsonl
+      TRAILING_EXECUTION_ENABLED: "true"
+      TRAILING_MIN_HOLD_MINUTES: ${TRAILING_MIN_HOLD_MINUTES:-0}
+      PAPER_NEXUS_API: http://fastapi:8000
+      BOT_JOURNAL_DIR: /app/journal
+      FQ_PAPER_POSITION_STATE: /app/journal/open_positions.json
+      FQ_PAPER_EQUITY_STATE: /app/journal/paper_equity.json
+      SIGNALCOPY_PAPER_MAX_AGE_CLOSE: ${SIGNALCOPY_PAPER_MAX_AGE_CLOSE:-true}
+      # Dynamic exit layer (FusionXomegabot port, 2026-09-06)
+      SIGNALCOPY_PAPER_DYNAMIC_EXIT: ${SIGNALCOPY_PAPER_DYNAMIC_EXIT:-true}
+      SCRATCH_EXIT_ENABLED: ${SCRATCH_EXIT_ENABLED:-true}
+      SCRATCH_EXIT_RANGING_MINUTES: ${SCRATCH_EXIT_RANGING_MINUTES:-30}
+      SCRATCH_EXIT_TRENDING_MINUTES: ${SCRATCH_EXIT_TRENDING_MINUTES:-45}
+      SCRATCH_EXIT_MAX_ABS_PNL_PCT: ${SCRATCH_EXIT_MAX_ABS_PNL_PCT:-0.4}
+      DAMAGE_REDUCER_ENABLED: ${DAMAGE_REDUCER_ENABLED:-true}
+      DAMAGE_REDUCER_MIN_HOLD_MINUTES: ${DAMAGE_REDUCER_MIN_HOLD_MINUTES:-45}
+      DAMAGE_REDUCER_MAX_LOSS_PCT: ${DAMAGE_REDUCER_MAX_LOSS_PCT:--2.5}
+      PROFIT_LOCK_ENABLED: ${PROFIT_LOCK_ENABLED:-true}
+      PROFIT_LOCK_MIN_MINUTES: ${PROFIT_LOCK_MIN_MINUTES:-15}
+      PROFIT_LOCK_TRIGGER_PCT: ${PROFIT_LOCK_TRIGGER_PCT:-1.0}
+      PROFIT_LOCK_BUFFER_PCT: ${PROFIT_LOCK_BUFFER_PCT:-0.3}
+      TRAIL_SL_ENABLED: ${TRAIL_SL_ENABLED:-true}
+      TRAIL_SL_PCT: ${TRAIL_SL_PCT:-0.8}
+      TRAIL_SL_ATR_MULTIPLIER: ${TRAIL_SL_ATR_MULTIPLIER:-1.5}
+      MAX_HOLD_TRENDING: ${MAX_HOLD_TRENDING:-480}
+      MAX_HOLD_RANGING: ${MAX_HOLD_RANGING:-240}
+      MAX_HOLD_HIGH_VOL: ${MAX_HOLD_HIGH_VOL:-120}
+      MAX_HOLD_MINUTES: ${MAX_HOLD_MINUTES:-300}
+      SIGNAL_COPY_PARSER_NOTIFY_BOT_TOKEN: ${SIGNAL_COPY_PARSER_NOTIFY_BOT_TOKEN:-}
+      SIGNAL_COPY_PARSER_NOTIFY_CHAT_ID: ${SIGNAL_COPY_PARSER_NOTIFY_CHAT_ID:-0}
+      SIGNAL_COPY_TRADES_NOTIFY_BOT_TOKEN: ${SIGNAL_COPY_TRADES_NOTIFY_BOT_TOKEN:-}
+      SIGNAL_COPY_TRADES_NOTIFY_CHAT_ID: ${SIGNAL_COPY_TRADES_NOTIFY_CHAT_ID:-0}
+      BINANCE_TESTNET_API_KEY: ${BINANCE_TESTNET_API_KEY:-}
+      BINANCE_TESTNET_SECRET: ${BINANCE_TESTNET_SECRET:-}
+      # Bybit mainnet real money configuration
+      GATEWAY_TRADER_MODE: ${GATEWAY_TRADER_MODE:-bybit}  # paper, bybit, testnet
+      BYBIT_API_KEY: ${BYBIT_API_KEY:-}
+      BYBIT_SECRET: ${BYBIT_SECRET:-}
+      SIGNALCOPY_CAPITAL: ${SIGNALCOPY_CAPITAL:-100}
+      SIGNALCOPY_RISK_PER_TRADE_USD: ${SIGNALCOPY_RISK_PER_TRADE_USD:-2}
+      SIGNALCOPY_MAX_LEVERAGE: ${SIGNALCOPY_MAX_LEVERAGE:-10}
+      SIGNALCOPY_MAX_CONCURRENT: ${SIGNALCOPY_MAX_CONCURRENT:-10}
+      SIGNALCOPY_BYBIT_DYNAMIC_EXIT: ${SIGNALCOPY_BYBIT_DYNAMIC_EXIT:-true}
+      JOURNAL_PATH: /app/journal
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ../journal:/app/journal
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # ============================================================
+  # FUSIONNEW forward-test bots — BEST STRATEGY (btc-regime+cvd+stoch70)
+  # Isolated: own token, own STATE_DIR (runtime/fusionnew), host config mounted RO.
+  # Zero-risk to live h1/m30 (they read baked config; these read mounted config).
+  # ============================================================
+  fusionnew_h1:
+    image: nexus-bot:latest
+    container_name: nexus_fusionnew_h1
+    environment:
+      BOT_NAME: h1_fusionnew
+      # Live audit 2026-07-26: sub-1.5% stops were net-negative live (SL buckets
+      # <1.5% all lost; >=1.5% was the only profitable one). Ablation H1 90d:
+      # floor 1.0 = best IS PF 9.80 / OOS PF 5.86. Set "0" to restore old behavior.
+      SL_FLOOR_PCT: "1.0"
+      # Cap setup age (LTF bars). Was unlimited: 3-day-old zones surfaced and then
+      # died at the liquidity gate (only 6/28 live setups survived). 288 = ~1 day @5m.
+      NEAREST_MAX_AGE: "288"
+      # #4: relax btc_regime — block counter-trend only when BTC regime is STRONG
+      # (|EMA50-EMA200|/EMA200 >= 0.75%). Was 0-trade for days under binary filter.
+      # Validated backtest OOS PF 3.68->4.10 (H1). Set "0" to restore old behavior.
+      BTC_REGIME_STRONG_PCT: "0.75"
+      PYTHONUNBUFFERED: "1"
+      NEXUS_API_URL: http://fastapi:8000
+      STATE_DIR: /state
+      HEARTBEAT_DIR: /state
+      TELEGRAM_BOT_TOKEN: ${FUSIONNEW_TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      WHALE_RUNTIME_DIR: /app/runtime/whales
+      LOG_DIR: /tmp
+    volumes:
+      - ../runtime/fusionnew:/state
+      - ../runtime/logs:/logs
+      - ../runtime/whales:/app/runtime/whales
+      - ../runtime/revo:/app/runtime/revo:ro
+      - ../bots/config.yaml:/app/bots/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  fusionnew_m30:
+    image: nexus-bot:latest
+    container_name: nexus_fusionnew_m30
+    environment:
+      BOT_NAME: m30_fusionnew
+      # Live audit 2026-07-26 + ablation M30 90d: floor 2.5 is the ONLY variant
+      # passing IS PF>1 AND OOS PF>1 (OOS PF 1.12, n=20). Tighter floors were
+      # OOS-negative on this tier. Set "0" to restore old behavior.
+      SL_FLOOR_PCT: "2.5"
+      # Cap setup age (LTF bars). M30 uses 3m LTF => 480 bars ~= 1 day.
+      NEAREST_MAX_AGE: "480"
+      # #4: relax btc_regime (see fusionnew_h1). Validated OOS PF 3.58->3.66 (M30).
+      BTC_REGIME_STRONG_PCT: "0.75"
+      # #3: M30 uses 3m LTF to differentiate from H1 (both were 5m => identical
+      # signals). Validated OOS PF 3.58->5.14, DD 84.8->61.0. Only this bot; the
+      # imbalance M30 bot stays 5m (3m doubled its DD).
+      LTF_OVERRIDE: "3m"
+      PYTHONUNBUFFERED: "1"
+      NEXUS_API_URL: http://fastapi:8000
+      STATE_DIR: /state
+      HEARTBEAT_DIR: /state
+      TELEGRAM_BOT_TOKEN: ${FUSIONNEW_TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      WHALE_RUNTIME_DIR: /app/runtime/whales
+      LOG_DIR: /tmp
+    volumes:
+      - ../runtime/fusionnew:/state
+      - ../runtime/logs:/logs
+      - ../runtime/whales:/app/runtime/whales
+      - ../runtime/revo:/app/runtime/revo:ro
+      - ../bots/config.yaml:/app/bots/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  fusionnew_m30_btc_corr:
+    image: nexus-bot:latest
+    container_name: nexus_fusionnew_m30_btc_corr
+    environment:
+      BOT_NAME: m30_fusionnew_btc_corr
+      SL_FLOOR_PCT: "2.5"
+      NEAREST_MAX_AGE: "480"
+      BTC_REGIME_STRONG_PCT: "0.75"
+      LTF_OVERRIDE: "3m"
+      PYTHONUNBUFFERED: "1"
+      NEXUS_API_URL: http://fastapi:8000
+      STATE_DIR: /state
+      HEARTBEAT_DIR: /state
+      TELEGRAM_BOT_TOKEN: ${FUSIONNEW_TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      WHALE_RUNTIME_DIR: /app/runtime/whales
+      LOG_DIR: /tmp
+      NINE_ROUTER_API_KEY: ${NINE_ROUTER_API_KEY}
+      NINE_ROUTER_BASE: ${NINE_ROUTER_BASE:-http://host.docker.internal:20128/v1}
+      ADVERSARIAL_MODEL: ${ADVERSARIAL_MODEL:-Free-Tiers}
+      ADVERSARIAL_MODEL_FALLBACK: ${ADVERSARIAL_MODEL_FALLBACK:-cerebras/gpt-oss-120b}
+    volumes:
+      - ../runtime/fusionnew:/state
+      - ../runtime/logs:/logs
+      - ../runtime/whales:/app/runtime/whales
+      - ../runtime/revo:/app/runtime/revo:ro
+      - ../bots/config.yaml:/app/bots/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["bots"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # Isolated Fusion Quantum gateway. Separate portfolio, state, and port.
+  fusion_quantum_gateway:
+    image: nexus-bot:latest
+    container_name: nexus_fusion_quantum_gateway
+    command: ["python", "-u", "-m", "uvicorn", "gateway.run_gateway:app", "--host", "0.0.0.0", "--port", "8790"]
+    user: "1000:1000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app
+      GATEWAY_TOKEN: ${FQ_GATEWAY_TOKEN:-${GATEWAY_TOKEN}}
+      GATEWAY_PAPER_MAINNET: "true"
+      STARTING_BALANCE: ${FQ_STARTING_BALANCE:-1000}
+      MAX_OPEN_POS_GLOBAL: ${FQ_MAX_OPEN_POS_GLOBAL:-20}
+      MAX_SAME_DIRECTION_POS: ${FQ_MAX_SAME_DIRECTION_POS:-20}
+      MAX_TOTAL_EXPOSURE_PCT: ${FQ_MAX_TOTAL_EXPOSURE_PCT:-100000}
+      MAX_GLOBAL_OPEN_RISK_PCT: ${FQ_MAX_GLOBAL_OPEN_RISK_PCT:-0.20}
+      PAPER_TAKER_FEE_PCT: ${FQ_PAPER_TAKER_FEE_PCT:-0.0005}
+      PAPER_SLIPPAGE_PCT: ${FQ_PAPER_SLIPPAGE_PCT:-0.0005}
+      FQ_MAX_RUNNING_POSITIONS: ${FQ_MAX_RUNNING_POSITIONS:-20}
+      FQ_PAPER_POSITION_STATE: /app/fq_journal/open_positions.json
+      FQ_TELEGRAM_BOT_TOKEN: ${FQ_TELEGRAM_BOT_TOKEN:-}
+      FQ_TELEGRAM_CHAT_ID: ${FQ_TELEGRAM_CHAT_ID:-}
+      PAPER_NEXUS_API: http://fastapi:8000
+      BOT_JOURNAL_DIR: /app/fq_journal
+    ports:
+      - "127.0.0.1:8790:8790"
+    volumes:
+      - ../runtime/fusion_quantum/journal:/app/fq_journal
+    depends_on:
+      fastapi:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["fusion-quantum-paper"]
+    networks:
+      - nexus_net
+      - docker_default
+
+  # Isolated H4+15m validation runner. Never included by "bots" profile.
+  # Start explicitly: docker compose --profile fusion-quantum-paper up -d fusion_quantum_gateway fusion_quantum_paper
+  fusion_quantum_paper:
+    image: nexus-bot:latest
+    container_name: nexus_fusion_quantum_paper
+    command: ["python", "-u", "-m", "fusion_quantum.paper_runner"]
+    user: "1000:1000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      NEXUS_API_URL: http://fastapi:8000
+      GATEWAY_URL: http://fusion_quantum_gateway:8790/gateway
+      GATEWAY_TOKEN: ${FQ_GATEWAY_TOKEN:-${GATEWAY_TOKEN}}
+      FQ_RUNTIME_DIR: /state
+      FQ_PAPER_AUDIT: /state/paper_gateway_audit.jsonl
+      FQ_UNIVERSE_FILE: /app/runtime/revo/canonical_universe.txt
+      FQ_POLL_SEC: ${FQ_POLL_SEC:-300}
+      FQ_FIB_EXPIRY: ${FQ_FIB_EXPIRY:-6}
+      FQ_TELEGRAM_BOT_TOKEN: ${FQ_TELEGRAM_BOT_TOKEN:-}
+      FQ_TELEGRAM_CHAT_ID: ${FQ_TELEGRAM_CHAT_ID:-}
+      LOG_DIR: /tmp
+      MPLCONFIGDIR: /tmp/matplotlib
+    volumes:
+      - ../runtime/fusion_quantum:/state
+      - ../runtime/revo:/app/runtime/revo:ro
+    depends_on:
+      fastapi:
+        condition: service_started
+      fusion_quantum_gateway:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["fusion-quantum-paper"]
+    networks:
+      - nexus_net
+      - docker_default
+
+networks:
+  nexus_net:
+    external: true
+  docker_default:
+    external: true
+
+volumes:
+  timescale_data:
+    driver: local

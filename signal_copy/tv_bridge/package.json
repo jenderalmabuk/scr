@@ -1,0 +1,1 @@
+{"name":"tv-bridge","version":"1.0.0","private":true,"type":"module","dependencies":{"@mathieuc/tradingview":"^3.5.2"}}
