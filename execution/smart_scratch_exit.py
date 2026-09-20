@@ -352,8 +352,27 @@ def update_scratch_excursion(position: Dict[str, Any], mark: float) -> Dict[str,
     entry = _safe_float(position.get('entry_price'))
     mark = _safe_float(mark)
     side = str(position.get('side') or '').upper()
-    sl = _safe_float(position.get('provider_sl_original') or position.get('sl_price'))
-    risk_distance = abs(entry - sl) if entry > 0 and sl > 0 else entry * 0.01
+    initial_rd = _safe_float(position.get('initial_risk_distance'))
+    if initial_rd > 0:
+        risk_distance = initial_rd
+    else:
+        sl = _safe_float(position.get('provider_sl_original') or position.get('original_sl_price'))
+        if sl <= 0 or abs(entry - sl) <= 0.000001:
+            meta = position.get('metadata') or {}
+            adv = meta.get('adv_snapshot') or {}
+            tp_plan = adv.get('manual_tp_plan') or {}
+            plan_rd = _safe_float(tp_plan.get('risk_distance'))
+            if plan_rd > 0:
+                sl = entry - plan_rd if side == 'LONG' else entry + plan_rd
+            else:
+                tp_prices = position.get('tp_prices') or []
+                if tp_prices and len(tp_prices) > 0:
+                    tp1 = _safe_float(tp_prices[0])
+                    if abs(tp1 - entry) > 0:
+                        sl = entry - abs(tp1 - entry) if side == 'LONG' else entry + abs(tp1 - entry)
+                if sl <= 0 or abs(entry - sl) <= 0.000001:
+                    sl = _safe_float(position.get('sl_price'))
+        risk_distance = abs(entry - sl) if entry > 0 and sl > 0 and abs(entry - sl) > 0.000001 else entry * 0.01
 
     if entry <= 0 or mark <= 0 or risk_distance <= 0:
         snapshot = {

@@ -520,6 +520,9 @@ class BybitMainnetTrader:
                 "side": side,
                 "entry_price": actual_entry,
                 "sl_price": sl_price,
+                "original_sl_price": sl_price,
+                "provider_sl_original": sl_price,
+                "initial_risk_distance": abs(actual_entry - sl_price),
                 "tp_prices": tp_prices,
                 "tp_hit": [],
                 "qty": str(actual_qty),
@@ -1397,6 +1400,37 @@ class BybitMainnetTrader:
             else:
                 return mark >= level
     
+    def _get_risk_distance(self, pos: Dict) -> float:
+        """Resolve the initial/original risk distance for R-multiple calculations.
+        Avoids collapsing to 0.0 when sl_price is moved to breakeven."""
+        entry = float(pos.get("entry_price") or 0.0)
+        initial_rd = float(pos.get("initial_risk_distance") or 0.0)
+        if initial_rd > 0:
+            return initial_rd
+
+        orig_sl = float(pos.get("provider_sl_original") or pos.get("original_sl_price") or 0.0)
+        if orig_sl > 0 and abs(entry - orig_sl) > 0:
+            return abs(entry - orig_sl)
+
+        meta = pos.get("metadata") or {}
+        adv = meta.get("adv_snapshot") or {}
+        tp_plan = adv.get("manual_tp_plan") or {}
+        plan_rd = float(tp_plan.get("risk_distance") or 0.0)
+        if plan_rd > 0:
+            return plan_rd
+
+        tp_prices = pos.get("tp_prices") or []
+        if tp_prices and len(tp_prices) > 0:
+            tp1 = float(tp_prices[0])
+            if abs(tp1 - entry) > 0:
+                return abs(tp1 - entry)
+
+        sl = float(pos.get("sl_price") or 0.0)
+        if sl > 0 and abs(entry - sl) > 0.000001:
+            return abs(entry - sl)
+
+        return abs(entry * 0.01) if entry > 0 else 1.0
+
     async def _apply_dynamic_exits(self, symbol: str, pos: Dict, mark: float) -> bool:
         """
         Apply dynamic exit layer (SCRATCH/DAMAGE/PROFIT/TRAILING).
@@ -1562,7 +1596,7 @@ class BybitMainnetTrader:
                 if tp_hit_count >= 1:
                     # Calculate new SL (breakeven + buffer)
                     sl = pos.get("sl_price", 0)
-                    risk_distance = abs(entry - sl)
+                    risk_distance = self._get_risk_distance(pos)
                     buffer_distance = risk_distance * (lock_buffer / 100)
                     
                     if side == "LONG":
@@ -1632,7 +1666,7 @@ class BybitMainnetTrader:
         tp_hit_count = len(pos.get("tp_hit", []))
         entry = float(pos.get("entry_price") or 0)
         sl = float(pos.get("sl_price") or 0)
-        risk_distance = abs(entry - sl) if sl else abs(entry * 0.01)
+        risk_distance = self._get_risk_distance(pos)
         
         if side == "LONG":
             profit_r = (mark - entry) / risk_distance if risk_distance else 0
