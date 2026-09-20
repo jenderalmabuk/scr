@@ -1543,6 +1543,7 @@ class BybitMainnetTrader:
                 "-1002053675871": "15m",     # naorist
                 "-1002128890109": "1h",      # raydium
                 "-1003801941007": "15m",     # Data's Inner Circle 👑
+                "-1001161683441": "4h",      # Global Crypto Research (GCR)
             }
             
             scratch_min = calculate_smart_scratch_timeout(
