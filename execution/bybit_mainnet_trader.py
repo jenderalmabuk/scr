@@ -57,6 +57,7 @@ class BybitMainnetTrader:
         # Load positions and state
         self.positions: Dict[str, Dict] = {}
         self._position_lock = asyncio.Lock()
+        self._kline_cache: Dict[str, Dict[str, Any]] = {}
         self._load_positions()
         
         logger.info(
@@ -1431,6 +1432,64 @@ class BybitMainnetTrader:
 
         return abs(entry * 0.01) if entry > 0 else 1.0
 
+    async def _get_recent_swing_level(self, symbol: str, side: str, limit: int = 12) -> Optional[float]:
+        """
+        Identify recent structural swing level from 15m closed candles.
+        
+        For LONG: finds the lowest low among recent closed 15m candles and applies
+        a -0.3% anti-hunt buffer.
+        For SHORT: finds the highest high among recent closed 15m candles and applies
+        a +0.3% anti-hunt buffer.
+        
+        Caches kline results for 30s to avoid redundant API load.
+        """
+        now = time.time()
+        cached = self._kline_cache.get(symbol)
+        if cached and (now - cached.get("ts", 0) < 30.0):
+            klines = cached.get("klines", [])
+        else:
+            try:
+                klines = await asyncio.to_thread(
+                    self.client.get_klines,
+                    symbol=symbol,
+                    interval="15",
+                    limit=limit
+                )
+                if klines:
+                    self._kline_cache[symbol] = {"ts": now, "klines": klines}
+            except Exception as e:
+                logger.warning(f"[HYBRID_TRAIL] Failed to fetch klines for {symbol}: {e}")
+                if cached:
+                    klines = cached.get("klines", [])
+                else:
+                    return None
+        
+        if not klines or len(klines) < 2:
+            return None
+        
+        # klines[0] is current open candle; klines[1:] are closed candles
+        closed_klines = klines[1:min(len(klines), limit)]
+        if not closed_klines:
+            return None
+        
+        try:
+            buffer_pct = float(os.getenv("HYBRID_TRAIL_SWING_BUFFER_PCT", "0.3")) / 100.0
+            if side == "LONG":
+                window_lows = [float(k[3]) for k in closed_klines[:8] if len(k) > 3]
+                if not window_lows:
+                    return None
+                recent_swing_low = min(window_lows)
+                return recent_swing_low * (1.0 - buffer_pct)
+            else:
+                window_highs = [float(k[2]) for k in closed_klines[:8] if len(k) > 2]
+                if not window_highs:
+                    return None
+                recent_swing_high = max(window_highs)
+                return recent_swing_high * (1.0 + buffer_pct)
+        except Exception as e:
+            logger.warning(f"[HYBRID_TRAIL] Error parsing klines for {symbol}: {e}")
+            return None
+
     async def _apply_dynamic_exits(self, symbol: str, pos: Dict, mark: float) -> bool:
         """
         Apply dynamic exit layer (SCRATCH/DAMAGE/PROFIT/TRAILING).
@@ -1660,9 +1719,9 @@ class BybitMainnetTrader:
                         else:
                             logger.error(f"[PROFIT_LOCK] {symbol} failed to update SL: {e}")
         
-        # LAYER 4: TRAILING (adaptive trailing after lock)
-        # Process only the current position. This function already runs once per
-        # symbol, so looping all positions here caused N×N quote/API checks.
+        # LAYER 4: HYBRID STEP-LOCK RATCHET & 15M SWING-LOW TRAILING ENGINE
+        # Synthesizes structural invalidation (recent 15m closed candle swing)
+        # with milestone step-lock floor (locking TP1/TP2/TP3 levels).
         tp_hit_count = len(pos.get("tp_hit", []))
         entry = float(pos.get("entry_price") or 0)
         sl = float(pos.get("sl_price") or 0)
@@ -1690,51 +1749,115 @@ class BybitMainnetTrader:
             pos["low_watermark"] = min(float(pos["low_watermark"]), mark)
             peak = float(pos["low_watermark"])
         
-        if side == "LONG":
-            profit_r = (mark - entry) / risk_distance if risk_distance else 0
-        else:
-            profit_r = (entry - mark) / risk_distance if risk_distance else 0
-        
-        if profit_r < 1.5:
+        # Don't activate trailing ratchet until at least 1.5R profit or TP1 hit
+        if profit_r < 1.5 and tp_hit_count < 1:
             return False
         
-        trail_distance = risk_distance * 0.6
-        if side == "LONG":
-            trailing_sl = peak - trail_distance
-            if trailing_sl <= sl:
-                return False
-            new_sl = trailing_sl
-            # Cap maximum SL movement per cycle to 0.5R to prevent jumps
-            max_move = risk_distance * 0.5
-            if new_sl - sl > max_move:
-                new_sl = sl + max_move
-        else:
-            trailing_sl = peak + trail_distance
-            if sl > 0 and trailing_sl >= sl:
-                return False
-            new_sl = trailing_sl
-            # Cap maximum SL movement per cycle to 0.5R to prevent jumps
-            max_move = risk_distance * 0.5
-            if sl > 0 and sl - new_sl > max_move:
-                new_sl = sl - max_move
+        # 1. Milestone Step-Lock Floor Calculation
+        tp_prices = pos.get("tp_prices") or []
+        def _get_tp_val(idx: int, default_r: float) -> float:
+            if len(tp_prices) > idx:
+                try:
+                    val = float(tp_prices[idx])
+                    if val > 0:
+                        return val
+                except (ValueError, TypeError):
+                    pass
+            if side == "LONG":
+                return entry + (risk_distance * default_r)
+            else:
+                return entry - (risk_distance * default_r)
+
+        tp1 = _get_tp_val(0, 1.0)
+        tp2 = _get_tp_val(1, 2.0)
+        tp3 = _get_tp_val(2, 3.0)
         
+        be_buffer = risk_distance * 0.05
+        step_floor = sl
+        
+        if side == "LONG":
+            be_level = entry + be_buffer
+            if tp_hit_count >= 3 or profit_r >= 3.0:
+                # After TP3 or 3.0R: Floor is locked at TP2
+                step_floor = max(step_floor, tp2)
+            elif tp_hit_count >= 2 or profit_r >= 2.0:
+                # After TP2 or 2.0R: Floor is locked at TP1
+                step_floor = max(step_floor, tp1)
+            elif tp_hit_count >= 1 or locked or profit_r >= 1.5:
+                # After TP1 or 1.5R: Floor is locked at Breakeven + buffer
+                step_floor = max(step_floor, be_level)
+        else:
+            be_level = entry - be_buffer
+            if tp_hit_count >= 3 or profit_r >= 3.0:
+                step_floor = min(step_floor, tp2) if step_floor > 0 else tp2
+            elif tp_hit_count >= 2 or profit_r >= 2.0:
+                step_floor = min(step_floor, tp1) if step_floor > 0 else tp1
+            elif tp_hit_count >= 1 or locked or profit_r >= 1.5:
+                step_floor = min(step_floor, be_level) if step_floor > 0 else be_level
+
+        # 2. Query 15m Structural Swing Level Invalidation
+        swing_level = await self._get_recent_swing_level(symbol, side)
+        
+        # 3. Hybrid Synthesis: Combine Structure + Step Floor
+        if side == "LONG":
+            candidate_sl = step_floor
+            if swing_level is not None and swing_level > sl:
+                # Market formed a higher structural low above current SL
+                # Follow swing low, guaranteed not to fall below milestone floor
+                candidate_sl = max(step_floor, swing_level)
+            
+            # Anti-choke breathing room: never put SL within 0.4% of mark price
+            max_allowed_sl = mark * 0.996
+            target_sl = min(candidate_sl, max_allowed_sl)
+            
+            # Only ratchet forward
+            if target_sl <= sl:
+                return False
+            
+            # Minimum increment check (at least 0.05R or 0.1% of mark)
+            min_increment = max(risk_distance * 0.05, mark * 0.001)
+            if (target_sl - sl) < min_increment:
+                return False
+        else:
+            candidate_sl = step_floor if step_floor > 0 else sl
+            if swing_level is not None and (sl == 0 or swing_level < sl):
+                candidate_sl = min(step_floor, swing_level) if step_floor > 0 else swing_level
+            
+            # Anti-choke breathing room: never put SL within 0.4% of mark price
+            min_allowed_sl = mark * 1.004
+            target_sl = max(candidate_sl, min_allowed_sl)
+            
+            # Only ratchet downward
+            if sl > 0 and target_sl >= sl:
+                return False
+            
+            min_increment = max(risk_distance * 0.05, mark * 0.001)
+            if sl > 0 and (sl - target_sl) < min_increment:
+                return False
+        
+        # 4. Update Trading Stop on Bybit Exchange
         try:
-            instrument = self.client.get_instrument_info(symbol)
+            instrument = await asyncio.to_thread(self.client.get_instrument_info, symbol)
             tick_size = float(instrument["priceFilter"]["tickSize"])
-            self.client.set_trading_stop(
+            quantized_sl = self._quantize(target_sl, tick_size)
+            
+            await asyncio.to_thread(
+                self.client.set_trading_stop,
                 symbol=symbol,
                 position_idx=0,
-                stop_loss=self._quantize(new_sl, tick_size)
+                stop_loss=quantized_sl
             )
             
-            pos["sl_price"] = new_sl
-            pos["sl_kind"] = "TRAILING"
+            old_sl = sl
+            pos["sl_price"] = target_sl
+            pos["sl_kind"] = "HYBRID_STEP_SWING"
             pos["locked_profit"] = True
             self._save_positions()
             
             logger.info(
-                f"[TRAILING_LOCK] {symbol} {side} | SL {sl:.4f} → {new_sl:.4f} | "
-                f"peak={peak:.4f} trail_dist={trail_distance:.4f} profit={profit_r:.2f}R"
+                f"[HYBRID_TRAIL] {symbol} {side} ratchet: SL {old_sl:.4f} → {target_sl:.4f} "
+                f"(quantized={quantized_sl}) | step_floor={step_floor:.4f}, "
+                f"swing_lvl={f'{swing_level:.4f}' if swing_level else 'N/A'}, mark={mark:.4f}, profit={profit_r:.2f}R"
             )
         except Exception as e:
             err_str = str(e)
@@ -1742,7 +1865,7 @@ class BybitMainnetTrader:
                 return False
             if "10001" in err_str and "zero position" in err_str:
                 return False
-            logger.error(f"[TRAILING_LOCK] {symbol} failed to update SL: {e}")
+            logger.error(f"[HYBRID_TRAIL] {symbol} failed to update SL: {e}")
         
         return False
     

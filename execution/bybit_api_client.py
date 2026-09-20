@@ -160,6 +160,34 @@ class BybitClient:
             raise BybitAPIError(f"No instrument info for {symbol}")
         return result["list"][0]
     
+    def get_klines(
+        self,
+        symbol: str,
+        interval: str = "15",
+        limit: int = 15,
+        category: str = "linear"
+    ) -> list:
+        """Get kline/candlestick data.
+        
+        Args:
+            symbol: Symbol name, e.g. "BTCUSDT"
+            interval: Kline interval (e.g. "1", "3", "5", "15", "30", "60", "120", "240", "D", "W")
+            limit: Limit for data size per page. [1, 1000]. Default: 15
+            category: Product category, default "linear"
+            
+        Returns:
+            List of klines: [startTime, openPrice, highPrice, lowPrice, closePrice, volume, turnover]
+            Sorted by startTime in descending order (index 0 is current open candle, index 1 is last closed candle)
+        """
+        params = {
+            "category": category,
+            "symbol": symbol,
+            "interval": str(interval),
+            "limit": limit
+        }
+        result = self._request("/v5/market/kline", params=params)
+        return result.get("list", [])
+    
     # Private endpoints
     
     def create_order(
