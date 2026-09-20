@@ -622,6 +622,8 @@ services:
       SIGNAL_COPY_NOTIFY_WEAK: ${SIGNAL_COPY_NOTIFY_WEAK:-true}
       # Legacy validation mode (less strict, like old bot)
       SIGNAL_COPY_LEGACY_VALIDATION: ${SIGNAL_COPY_LEGACY_VALIDATION:-false}
+      SIGNAL_COPY_CHANNEL_SCORE_BONUS: ${SIGNAL_COPY_CHANNEL_SCORE_BONUS:-}
+      SIGNAL_COPY_CHANNEL_SCORE_PENALTY: ${SIGNAL_COPY_CHANNEL_SCORE_PENALTY:-}
       # Discord (optional)
       SIGNAL_COPY_DISCORD_ENABLED: ${SIGNAL_COPY_DISCORD_ENABLED:-false}
       SIGNAL_COPY_DISCORD_BOT_TOKEN: ${SIGNAL_COPY_DISCORD_BOT_TOKEN:-}
@@ -639,6 +641,9 @@ services:
       SIGNAL_COPY_VISION_MODEL: ${SIGNAL_COPY_VISION_MODEL:-qwen2.5vl:3b}
       # Pending-limit lifecycle journal (PENDING/FILLED/EXPIRED/DRIFT/REJECTED)
       SIGNAL_COPY_PENDING_JOURNAL: /state/pending_lifecycle.jsonl
+      SIGNAL_COPY_LIFECYCLE_JOURNAL: /state/signal_lifecycle.jsonl
+      SIGNAL_COPY_COMMITTEE_DECISION_JOURNAL: /state/committee_decisions.jsonl
+      SIGNAL_COPY_COMMITTEE_OUTCOME_JOURNAL: /state/committee_outcomes.jsonl
       SIGNAL_COPY_CHANNEL_PERFORMANCE_STORE: /state/channel_performance.json
       SIGNAL_COPY_OUTCOME_STORE: /state/signal_outcomes.json
     volumes:

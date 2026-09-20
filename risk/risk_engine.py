@@ -45,7 +45,7 @@ class RiskManager:
         self.max_drawdown_pct = float(MAX_DRAWDOWN_PCT)
         self.max_daily_loss_pct = float(MAX_DAILY_LOSS_PCT)
         self.max_total_exposure_pct = float(MAX_TOTAL_EXPOSURE_PCT)
-        paper_mode = os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes")
+        paper_mode = os.getenv("GATEWAY_PAPER_MAINNET", "false").lower() in ("1", "true", "yes")
         self.ignore_max_drawdown_for_sample = paper_mode and os.getenv(
             "PAPER_SAMPLE_IGNORE_MAX_DRAWDOWN", "false"
         ).lower() in ("1", "true", "yes")
@@ -213,7 +213,10 @@ class RiskManager:
         for pos in self._iter_trader_positions():
             entry = self._safe_float(self._position_attr(pos, "entry_price", 0.0))
             stop = self._safe_float(self._position_attr(pos, "sl_price", self._position_attr(pos, "sl", 0.0)))
-            qty = self._safe_float(self._position_attr(pos, "qty", 0.0))
+            qty = self._safe_float(
+                self._position_attr(pos, "qty_remaining", self._position_attr(pos, "qty", 0.0)),
+                0.0,
+            )
             side = str(self._position_attr(pos, "side", "") or "").upper()
             valid_stop = (side == "LONG" and 0 < stop < entry) or (side == "SHORT" and stop > entry)
             if entry > 0 and qty > 0 and valid_stop:
@@ -228,7 +231,7 @@ class RiskManager:
 
     @staticmethod
     def get_max_running_positions() -> int:
-        paper = os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes")
+        paper = os.getenv("GATEWAY_PAPER_MAINNET", "false").lower() in ("1", "true", "yes")
         key = "PAPER_MAX_RUNNING_POSITIONS" if paper else "REAL_MAX_RUNNING_POSITIONS"
         default = "30" if paper else "20"
         return max(1, int(os.getenv(key, os.getenv("FQ_MAX_RUNNING_POSITIONS", default))))

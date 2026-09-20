@@ -1,0 +1,15 @@
+{
+  "schema": "nexus.basket-plan",
+  "version": 1,
+  "generated_at": "2026-08-10T17:21:20Z",
+  "expires_at": "2026-08-10T17:36:20Z",
+  "source": "manual-proposal",
+  "provenance": {"proposal_at": "2026-08-10T17:21:20Z"},
+  "plans": [
+    {"symbol":"BEATUSDT","side":"Sell","zone":["1.9056","1.9581"],"trigger":"1.9056","invalid":"1.9581","stop":"2.0302","tp":"1.5843"},
+    {"symbol":"CYSUSDT","side":"Buy","zone":["1.1838","1.2054"],"trigger":"1.2054","invalid":"1.1838","stop":"1.1541","tp":"1.3378"},
+    {"symbol":"EPICUSDT","side":"Sell","zone":[".4446",".4494"],"trigger":".4446","invalid":".4494","stop":".4560","tp":".4151"},
+    {"symbol":"MUBARAKUSDT","side":"Buy","zone":[".021960",".022318"],"trigger":".022318","invalid":".021960","stop":".021469","tp":".024506"},
+    {"symbol":"ZECUSDT","side":"Sell","zone":["496.82","498.04"],"trigger":"496.82","invalid":"498.04","stop":"499.73","tp":"489.31"}
+  ]
+}

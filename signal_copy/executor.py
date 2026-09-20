@@ -88,7 +88,7 @@ class SignalExecutor:
         )
         return sizing
 
-    async def execute(self, result: ValidationResult, *, dry_run: bool = False, risk_pct: float = None) -> ExecutionOutcome:
+    async def execute(self, result: ValidationResult, *, dry_run: bool = False, risk_pct: float = None, risk_usd: float = None) -> ExecutionOutcome:
         sig = result.signal
         metrics = result.metrics_snapshot or {}
         entry_price = self._resolve_entry_price(sig, metrics)
@@ -107,20 +107,23 @@ class SignalExecutor:
         except Exception:
             equity = 0.0
 
-        if sig.stop_loss is not None and entry_price > 0 and equity > 0:
+        if sig.stop_loss is not None and entry_price > 0:
             sl_frac = abs(entry_price - sig.stop_loss) / entry_price
             if sl_frac > 0:
-                effective_risk_pct = min(risk_pct if risk_pct is not None else self.risk_pct, self.risk_pct)
-                risk_budget = equity * effective_risk_pct
+                if risk_usd is not None and risk_usd > 0:
+                    risk_budget = float(risk_usd)
+                elif equity > 0:
+                    effective_risk_pct = min(risk_pct if risk_pct is not None else self.risk_pct, self.risk_pct)
+                    risk_budget = equity * effective_risk_pct
+                else:
+                    risk_budget = 2.0
                 notional = risk_budget / sl_frac
-                # Cap by leverage capacity (use up to 50% of leveraged buying
-                # power as a safety margin), NOT by the tiny per-position
-                # notional cap meant for the multi-position scanner bot.
+                # Cap by leverage capacity (use up to 50% of leveraged buying power)
                 try:
                     lev = float(getattr(config, "LEVERAGE", 10) or 10)
                 except Exception:
                     lev = 10.0
-                margin_cap_notional = equity * lev * 0.5
+                margin_cap_notional = (equity if equity > 0 else 100.0) * lev * 0.5
                 if margin_cap_notional > 0:
                     notional = min(notional, margin_cap_notional)
 

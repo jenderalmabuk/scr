@@ -5,6 +5,32 @@ All weights are in arbitrary "points"; the engine normalizes earned/possible
 to a 0-100 confluence score. Adjust weights to emphasize factors you trust.
 """
 
+import os
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        raw = os.getenv(name, "").strip()
+        return float(raw) if raw else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        raw = os.getenv(name, "").strip()
+        return int(raw) if raw else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
 # --- factor weights (max points each can contribute) ---
 W_PRICE_FRESHNESS = 22.0   # is price still actionable vs the entry zone
 W_GEOMETRY        = 18.0   # SL distance sane + RR acceptable
@@ -16,8 +42,24 @@ W_TREND           = 10.0   # short-term structure alignment
 W_CHART_VISION    = 14.0   # chart/outlook image agrees with the trade (vision)
 
 # --- verdict thresholds (normalized 0-100) ---
-VALID_THRESHOLD = 55.0     # >= this => VALID (eligible to execute)
-WEAK_THRESHOLD  = 40.0     # >= this but < VALID => WEAK (notify, no auto-exec)
+VALID_THRESHOLD = _float_env("SIGNAL_COPY_VALID_THRESHOLD", 60.0)     # >= this => VALID quality
+WEAK_THRESHOLD  = _float_env("SIGNAL_COPY_WEAK_THRESHOLD", 45.0)      # >= this but < VALID => WEAK
+
+# --- auto-execution policy thresholds ---
+AUTO_MARKET_MIN_SCORE = _float_env("SIGNAL_COPY_AUTO_MARKET_MIN_SCORE", 65.0)
+AUTO_LIMIT_MIN_SCORE = _float_env("SIGNAL_COPY_AUTO_LIMIT_MIN_SCORE", 55.0)
+ADVERSARIAL_NO_OVERRIDE_MIN_SCORE = _float_env("SIGNAL_COPY_ADVERSARIAL_NO_OVERRIDE_MIN_SCORE", 75.0)
+ADVERSARIAL_MODE = os.getenv("SIGNAL_COPY_ADVERSARIAL_MODE", "off").strip().lower()
+COMMITTEE_MODE = os.getenv("SIGNAL_COPY_COMMITTEE_MODE", "shadow").strip().lower()
+COMMITTEE_WARN_DOWNGRADE_COUNT = _int_env("SIGNAL_COPY_COMMITTEE_WARN_DOWNGRADE_COUNT", 2)
+FLOW_NO_TRADE_MARKET_BLOCK = _bool_env("SIGNAL_COPY_FLOW_NO_TRADE_MARKET_BLOCK", True)
+PRICE_CHASE_MARKET_BLOCK = _bool_env("SIGNAL_COPY_PRICE_CHASE_MARKET_BLOCK", False)
+
+# --- adaptive entry & chase controls ---
+MAX_CHASE_R = _float_env("SIGNAL_COPY_MAX_CHASE_R", 0.35)
+MAX_DISCOUNT_R = _float_env("SIGNAL_COPY_MAX_DISCOUNT_R", 0.60)
+MIN_REMAINING_RR = _float_env("SIGNAL_COPY_MIN_REMAINING_RR", 0.70)
+DISCOUNT_FILL_ENABLED = _bool_env("SIGNAL_COPY_DISCOUNT_FILL_ENABLED", True)
 
 # --- entry-zone freshness ---
 ENTRY_ZONE_TOLERANCE_MULT = 0.5    # tolerance = zone_width * this ...

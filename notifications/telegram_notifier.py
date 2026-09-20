@@ -47,6 +47,14 @@ def _chat_id() -> str:
     )
 
 
+def _sanitize_log(value: Any) -> str:
+    token = _token()
+    text = str(value)
+    if token:
+        text = text.replace(token, "<redacted-token>")
+    return text.replace("api.telegram.org/bot", "api.telegram.org/bot<redacted>")
+
+
 async def _send(text: str) -> bool:
     """POST a message to the Telegram Bot API. Never raises."""
     token = _token()
@@ -71,12 +79,12 @@ async def _send(text: str) -> bool:
             resp = await client.post(url, json=body)
             if resp.status_code == 200:
                 return True
-            logger.error("[NOTIFY] telegram HTTP %s: %s", resp.status_code, resp.text[:200])
+            logger.error("[NOTIFY] telegram HTTP %s: %s", resp.status_code, _sanitize_log(resp.text[:200]))
             return False
     except ImportError:
         pass  # fall through to urllib
     except Exception as exc:  # network / telegram error
-        logger.error("[NOTIFY] httpx send failed: %s", exc)
+        logger.error("[NOTIFY] httpx send failed: %s", _sanitize_log(exc))
         return False
 
     # Fallback: stdlib urllib in a worker thread (keeps the event loop free)
@@ -94,7 +102,7 @@ async def _send(text: str) -> bool:
     try:
         return await asyncio.to_thread(_blocking)
     except Exception as exc:
-        logger.error("[NOTIFY] urllib send failed: %s", exc)
+        logger.error("[NOTIFY] urllib send failed: %s", _sanitize_log(exc))
         return False
 
 
@@ -106,6 +114,7 @@ def _fmt_close(p: Dict[str, Any]) -> str:
     pnl_usd = _f(p.get("pnl_usd"))
     hold = _f(p.get("hold_minutes"))
     reason = p.get("normalized_reason") or p.get("reason") or "EXIT"
+    pnl_source = str(p.get("pnl_source") or "").strip()
     balance = _f(p.get("balance_after") if p.get("balance_after") is not None else p.get("equity"))
 
     win = pnl_usd >= 0
@@ -117,6 +126,8 @@ def _fmt_close(p: Dict[str, Any]) -> str:
         f"PnL: <b>{sign}{pnl_usd:.2f} USD</b> ({sign}{pnl_pct:.2f}%)",
         f"Hold: {hold:.0f}m | Reason: <b>{reason}</b>",
     ]
+    if pnl_source == "bybit_closed_pnl":
+        lines.append("PnL source: <code>Bybit closedPnl</code>")
     if balance > 0:
         lines.append(f"Balance: <code>{balance:.2f} USD</code>")
     return "\n".join(lines)

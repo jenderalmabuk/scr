@@ -413,9 +413,12 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
         metrics_snapshot={
             k: metrics.get(k)
             for k in (
-                "price", "oi_change_15m_pct", "oi_change_1h_pct", "cvd_zscore",
-                "imbalance", "funding_rate", "rsi", "atr_pct", "vol_ratio",
-                "price_change_15m_pct", "regime_label",
+                "price", "oi_change_5m_pct", "oi_change_15m_pct", "oi_change_1h_pct",
+                "cvd_zscore", "imbalance", "funding_rate", "rsi", "atr_pct",
+                "vol_ratio", "price_change_15m_pct", "regime_label", "qvol_5m",
+                "flow_direction", "flow_source", "data_quality", "data_stale",
+                "flow_lookup_status", "flow_symbol_found", "mtf_alignment",
+                "tradingview", "chart_vision",
             )
         },
     )

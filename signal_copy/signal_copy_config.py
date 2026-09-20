@@ -52,6 +52,26 @@ def _ids(name: str) -> list[int]:
     return out
 
 
+def _float_map(name: str) -> dict[int, float]:
+    raw = os.getenv(name, "").strip()
+    out: dict[int, float] = {}
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        try:
+            out[int(key.strip())] = float(value.strip())
+        except ValueError:
+            pass
+    return out
+
+
+def _csv_upper(name: str, default: str = "") -> set[str]:
+    raw = os.getenv(name, default).strip()
+    return {part.strip().upper() for part in raw.replace(";", ",").split(",") if part.strip()}
+
+
 def _bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name, "").strip().lower()
     if not v:
@@ -70,6 +90,22 @@ TG_LISTENER_BOT_TOKEN = os.getenv("SIGNAL_COPY_TG_LISTENER_BOT_TOKEN", "").strip
 # Allowlist of Telegram chat ids to read signals from (empty = all joined).
 TG_SIGNAL_CHANNELS = _ids("SIGNAL_COPY_TG_CHANNELS")
 TG_CHANNEL_NAMES: dict[int, str] = {}  # optional id->name mapping for nicer labels
+
+# Per-channel validation score adjustment. Positive values are small boosts for
+# proven channels; negative values can reduce weak channels. Hard-blocked signals
+# are never upgraded by this adjustment.
+CHANNEL_SCORE_BONUS = _float_map("SIGNAL_COPY_CHANNEL_SCORE_BONUS")
+CHANNEL_SCORE_PENALTY = _float_map("SIGNAL_COPY_CHANNEL_SCORE_PENALTY")
+CHANNELS_CALIBRATION = set(_ids("SIGNAL_COPY_CALIBRATION_CHANNELS")) | {-1003988458515}
+
+
+def channel_score_adjustment(chat_id) -> float:
+    try:
+        cid = int(chat_id) if chat_id is not None else 0
+    except (TypeError, ValueError):
+        return 0.0
+    return float(CHANNEL_SCORE_BONUS.get(cid, 0.0)) + float(CHANNEL_SCORE_PENALTY.get(cid, 0.0))
+
 
 # --- Parser notifications channel (validation reports: VALID/WEAK/REJECT) ---
 PARSER_NOTIFY_BOT_TOKEN = os.getenv("SIGNAL_COPY_PARSER_NOTIFY_BOT_TOKEN", "").strip()
@@ -171,12 +207,14 @@ def vision_enabled_for_channel(chat_id) -> bool:
     """
     if not VISION_ENABLED:
         return False
-    if not CHANNELS_VISION:
-        return True
     try:
         cid = int(chat_id) if chat_id is not None else 0
     except (TypeError, ValueError):
         cid = 0
+    if cid in CHANNELS_CALIBRATION:
+        return True
+    if not CHANNELS_VISION:
+        return True
     return cid in CHANNELS_VISION
 # "openai" (OpenAI-compatible: local proxy / OpenRouter / Google Gemini openai-endpoint / OpenAI / similar)
 # or "n8n" (webhook to your n8n flow).
@@ -186,7 +224,7 @@ N8N_WEBHOOK_URL = os.getenv("SIGNAL_COPY_N8N_WEBHOOK_URL", "").strip()
 # OpenAI-compatible cloud/local backend.
 # Default: local proxy at http://127.0.0.1:20128/v1 with models gc/gemini-2.5-pro or groq/openai/gpt-oss-120b
 VISION_OPENAI_BASE_URL = os.getenv("SIGNAL_COPY_VISION_OPENAI_BASE_URL", "http://127.0.0.1:20128/v1").strip()
-VISION_OPENAI_API_KEY = os.getenv("SIGNAL_COPY_VISION_OPENAI_API_KEY", "sk-0b1153f1a8ae386c-rvqg8m-99aa5f44").strip()
+VISION_OPENAI_API_KEY = os.getenv("SIGNAL_COPY_VISION_OPENAI_API_KEY", "").strip()
 VISION_OPENAI_MODEL = os.getenv("SIGNAL_COPY_VISION_OPENAI_MODEL", "gc/gemini-2.5-pro").strip()
 
 # --- Adversarial gate (Tahap 3): bull/bear debate before entry ---
@@ -200,6 +238,30 @@ ADVERSARIAL_ENABLED = _bool("SIGNAL_COPY_ADVERSARIAL_ENABLED", True)
 ADVERSARIAL_MODE = os.getenv("SIGNAL_COPY_ADVERSARIAL_MODE", "off").strip().lower()
 # Deterministic validation score at/above which the LLM can NEVER block.
 ADVERSARIAL_SOFT_FLOOR = float(os.getenv("SIGNAL_COPY_ADVERSARIAL_SOFT_FLOOR", "90"))
+
+# --- Adversarial committee (shadow-first deterministic specialists) ---
+COMMITTEE_ENABLED = _bool("SIGNAL_COPY_COMMITTEE_ENABLED", False)
+COMMITTEE_MODE = os.getenv("SIGNAL_COPY_COMMITTEE_MODE", "shadow").strip().lower()
+COMMITTEE_LLM_ENABLED = _bool("SIGNAL_COPY_COMMITTEE_LLM_ENABLED", False)
+COMMITTEE_LEGACY_COMPARE = _bool("SIGNAL_COPY_COMMITTEE_LEGACY_COMPARE", True)
+COMMITTEE_RUN_ON_VERDICTS = _csv_upper("SIGNAL_COPY_COMMITTEE_RUN_ON_VERDICTS", "VALID,WEAK")
+COMMITTEE_SOFT_FLOOR = float(os.getenv("SIGNAL_COPY_COMMITTEE_SOFT_FLOOR", "90"))
+COMMITTEE_MIN_NO_VOTES = int(os.getenv("SIGNAL_COPY_COMMITTEE_MIN_NO_VOTES", "2"))
+COMMITTEE_HARD_NO_VOTES = int(os.getenv("SIGNAL_COPY_COMMITTEE_HARD_NO_VOTES", "3"))
+COMMITTEE_DECISION_JOURNAL = os.getenv(
+    "SIGNAL_COPY_COMMITTEE_DECISION_JOURNAL",
+    "runtime/state/committee_decisions.jsonl",
+).strip()
+COMMITTEE_OUTCOME_JOURNAL = os.getenv(
+    "SIGNAL_COPY_COMMITTEE_OUTCOME_JOURNAL",
+    "runtime/state/committee_outcomes.jsonl",
+).strip()
+COMMITTEE_ENTRY_WARN_DRIFT_R = float(os.getenv("SIGNAL_COPY_COMMITTEE_ENTRY_WARN_DRIFT_R", "0.50"))
+COMMITTEE_TP1_WARN_RR = float(os.getenv("SIGNAL_COPY_COMMITTEE_TP1_WARN_RR", "0.80"))
+COMMITTEE_SL_WARN_DISTANCE_PCT = float(os.getenv("SIGNAL_COPY_COMMITTEE_SL_WARN_DISTANCE_PCT", "20.0"))
+COMMITTEE_SL_MIN_DISTANCE_PCT = float(os.getenv("SIGNAL_COPY_COMMITTEE_SL_MIN_DISTANCE_PCT", "0.10"))
+COMMITTEE_LOW_QVOL_5M = float(os.getenv("SIGNAL_COPY_COMMITTEE_LOW_QVOL_5M", "50000"))
+COMMITTEE_CRITICAL_QVOL_5M = float(os.getenv("SIGNAL_COPY_COMMITTEE_CRITICAL_QVOL_5M", "10000"))
 
 # --- Entry style: regime-aware market vs pending-limit (chase control) ---
 # Drift = how far current price sits from the signal entry, measured in R

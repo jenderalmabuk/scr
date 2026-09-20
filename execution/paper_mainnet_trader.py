@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import aiohttp
 from signal_copy.fresh_quote import fetch_fresh_quote
-from execution.smart_scratch_exit import calculate_smart_scratch_timeout
+from execution.smart_scratch_exit import calculate_smart_scratch_timeout, evaluate_damage_reducer_gate, evaluate_scratch_exit_gate, update_scratch_excursion
 
 # Trailing stop execution config
 TRAILING_EXECUTION_ENABLED = os.getenv("TRAILING_EXECUTION_ENABLED", "false").lower() in ("1", "true", "yes")
@@ -33,6 +33,7 @@ TRAILING_MIN_HOLD_MINUTES = int(os.getenv("TRAILING_MIN_HOLD_MINUTES", "0"))
 PAPER_STATE_PATH = Path(os.getenv("FQ_PAPER_POSITION_STATE", "runtime/fusion_quantum/journal/open_positions.json"))
 PAPER_EQUITY_PATH = Path(os.getenv("FQ_PAPER_EQUITY_STATE", "runtime/fusion_quantum/journal/paper_equity.json"))
 SHADOW_TRAILING_PATH = Path(os.getenv("SHADOW_TRAILING_JOURNAL", "journal/shadow_trailing.jsonl"))
+SCRATCH_EXIT_AUDIT_PATH = Path(os.getenv("SCRATCH_EXIT_AUDIT_JOURNAL", "journal/scratch_exit_audit.jsonl"))
 DYNAMIC_SL_EXPERIMENT_EPOCH = "signalcopy_dynamic_sl_2026q3"
 DYNAMIC_SL_CONFIG_VERSION = "dynamic_sl_shadow_v1"
 DYNAMIC_SL_VARIANT_STATUS = {
@@ -132,6 +133,12 @@ def _append_shadow_result(row: Dict[str, Any]) -> None:
     """Append one immutable baseline-vs-shadow result at actual position close."""
     SHADOW_TRAILING_PATH.parent.mkdir(parents=True, exist_ok=True)
     with SHADOW_TRAILING_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, default=_jsonable, separators=(",", ":")) + "\n")
+
+
+def _append_scratch_audit_result(row: Dict[str, Any]) -> None:
+    SCRATCH_EXIT_AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with SCRATCH_EXIT_AUDIT_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, default=_jsonable, separators=(",", ":")) + "\n")
 
 UTC = timezone.utc
@@ -1069,6 +1076,8 @@ class PaperMainnetTrader:
             "next_tp_index": 0, "initial_qty": qty,
             "qty": qty, "notional": notional, "leverage": leverage, "regime": regime,
             "opened_at": opened_at, "status": "OPEN", "tp1_hit": False,
+            "scratch_high_watermark": fill, "scratch_low_watermark": fill,
+            "scratch_max_favorable_r": 0.0, "scratch_max_adverse_r": 0.0,
             "raw_entry_price": raw_fill, "entry_fee": entry_fee,
             "fill_ledger": [{"timestamp": datetime.now(UTC).isoformat(), "kind": "ENTRY",
                              "entry_price": fill, "qty": qty, "notional_usd": notional,
@@ -1115,12 +1124,6 @@ class PaperMainnetTrader:
                     if not pos:
                         continue
 
-                    # Dynamic exit layer (paper-only, env-gated). Runs BEFORE the
-                    # provider SL check so defensive exits fire first — same order
-                    # as FusionXomegabot. Returns True if it closed the position.
-                    if await self._apply_dynamic_exits(symbol, pos, mark):
-                        continue
-
                     sl = float(pos.get("sl_price") or 0)
                     if sl and self._level_hit(pos, mark, sl, favorable=False):
                         pos["sl_trigger_quote"] = quote
@@ -1128,6 +1131,14 @@ class PaperMainnetTrader:
                         continue
                     await self._apply_take_profits(symbol, mark)
                     pos = self.positions.get(symbol)
+                    if not pos:
+                        continue
+
+                    # Dynamic exits run after provider SL/TP checks to avoid scratch
+                    # overriding a valid provider TP partial.
+                    if await self._apply_dynamic_exits(symbol, pos, mark):
+                        continue
+
                     if pos:
                         self._ensure_bad_signal_classification(pos)
                         self._record_stale_conflict_shadow(pos, mark)
@@ -1257,6 +1268,36 @@ class PaperMainnetTrader:
             return False
         return _dyn_env_bool("SIGNALCOPY_PAPER_DYNAMIC_EXIT", "false")
 
+    def _config_bool(self, key: str, default: bool = False) -> bool:
+        val = os.getenv(key, "").lower()
+        if not val:
+            return default
+        return val in ("1", "true", "yes", "on")
+
+    def _append_scratch_audit(self, symbol: str, pos: Dict[str, Any], decision: Dict[str, Any], mark: float) -> None:
+        if not decision.get("time_due") or not decision.get("near_breakeven"):
+            return
+        bucket = int(float(decision.get("hold_minutes", 0)) // 15)
+        key = f"{decision.get('action')}:{decision.get('reason')}:{bucket}"
+        if pos.get("scratch_audit_last_key") == key and not decision.get("should_exit"):
+            return
+        pos["scratch_audit_last_key"] = key
+        try:
+            _append_scratch_audit_result({
+                "timestamp": datetime.now(UTC).isoformat(),
+                "symbol": symbol,
+                "exchange": "paper_mainnet",
+                "side": pos.get("side"),
+                "entry_price": pos.get("entry_price"),
+                "mark": mark,
+                "action": decision.get("action"),
+                "reason": decision.get("reason"),
+                "close_reason": "SCRATCH_EXIT" if decision.get("should_exit") else None,
+                "decision": decision,
+            })
+        except Exception as e:
+            logger.warning("[SCRATCH_AUDIT] %s write failed: %s", symbol, e)
+
     async def _apply_dynamic_exits(self, symbol: str, pos: Dict[str, Any], mark: float) -> bool:
         """Run the dynamic exit layers in old-bot order.
 
@@ -1307,6 +1348,11 @@ class PaperMainnetTrader:
 
         # unrealized — fraction, sign-corrected (matches old bot semantics)
         unrealized = ((mark - entry) / entry) if side == "LONG" else ((entry - mark) / entry)
+        scratch_excursion = update_scratch_excursion(pos, mark)
+        logger.info(
+            "[DYN_EXIT_CHECK] %s %s | hold %.0fm | pnl %+.2f%% | mfe=%.2fR",
+            symbol, side, hold_min, unrealized * 100.0, scratch_excursion.get("max_favorable_r", 0),
+        )
 
         # ── 1. SCRATCH_EXIT — kill zombie trades near breakeven ─────────────
         if self._config_bool("SCRATCH_EXIT_ENABLED", default=True):
@@ -1330,29 +1376,72 @@ class PaperMainnetTrader:
             )
             
             max_abs = _dyn_env_float("SCRATCH_EXIT_MAX_ABS_PNL_PCT", 0.4)
-            if hold_min >= scratch_min and abs(unrealized * 100.0) < max_abs:
-                pos["dynamic_exit_layer"] = {"layer": "SCRATCH_EXIT", "hold_min": hold_min,
-                                             "unrealized_pct": unrealized * 100.0,
-                                             "scratch_timeout_min": scratch_min,
+            decision = evaluate_scratch_exit_gate(
+                position=pos,
+                mark=mark,
+                hold_minutes=hold_min,
+                scratch_timeout_min=scratch_min,
+                unrealized_pct=unrealized * 100.0,
+                max_abs_pnl_pct=max_abs,
+            )
+            self._append_scratch_audit(symbol, pos, decision, mark)
+            if decision["should_exit"]:
+                pos["dynamic_exit_layer"] = {"layer": "SCRATCH_EXIT", **decision,
                                              "at": now.isoformat(), "mark": mark}
                 await self._close(symbol, mark, "SCRATCH_EXIT")
                 return True
+            if decision["time_due"] and decision["near_breakeven"]:
+                logger.info(
+                    "[SCRATCH_WAIT] %s %s | hold=%.0fm pnl=%+.2f%% mfe=%.2fR tp1_progress=%.0f%%",
+                    symbol, decision["reason"], hold_min, unrealized * 100.0,
+                    decision.get("max_favorable_r", 0), decision.get("tp1_progress", 0) * 100,
+                )
 
-        # ── 2. DAMAGE_REDUCER — cut bleeding positions before full SL ───────
-        # Old bot closes full qty at market (name is historical).
+        # ── 2. DAMAGE_REDUCER — cut confirmed losers before full SL ─────────
         if _dyn_env_bool("DAMAGE_REDUCER_ENABLED"):
             min_hold = _dyn_env_float("DAMAGE_REDUCER_MIN_HOLD_MINUTES", 45.0)
             max_loss = _dyn_env_float("DAMAGE_REDUCER_MAX_LOSS_PCT", -2.5)
-            if hold_min >= min_hold and (unrealized * 100.0) <= max_loss and sl > 0:
-                # Only fire while still ABOVE the provider SL — once SL is hit,
-                # the canonical HARD_SL path owns the exit (no double close).
-                above_sl = (mark > sl) if side == "LONG" else (mark < sl)
-                if above_sl:
-                    pos["dynamic_exit_layer"] = {"layer": "DAMAGE_REDUCER", "hold_min": hold_min,
-                                                 "unrealized_pct": unrealized * 100.0,
-                                                 "at": now.isoformat(), "mark": mark}
-                    await self._close(symbol, mark, "DAMAGE_REDUCER")
-                    return True
+            decision = evaluate_damage_reducer_gate(
+                position=pos,
+                mark=mark,
+                hold_minutes=hold_min,
+                unrealized_pct=unrealized * 100.0,
+                damage_min_hold_min=min_hold,
+                damage_max_loss_pct=max_loss,
+            )
+            # Only fire while still ABOVE the provider SL — once SL is hit,
+            # the canonical HARD_SL path owns the exit (no double close).
+            above_sl = (mark > sl) if side == "LONG" else (mark < sl)
+            if decision["should_exit"] and sl > 0 and above_sl:
+                pos["dynamic_exit_layer"] = {"layer": "DAMAGE_REDUCER", **decision,
+                                             "at": now.isoformat(), "mark": mark}
+                await self._close(symbol, mark, "DAMAGE_REDUCER")
+                return True
+            if decision.get("should_partial_exit") and sl > 0 and above_sl:
+                stage_key = str(decision.get("stage_key") or decision.get("reason") or "DAMAGE_PARTIAL")
+                done_stages = pos.setdefault("damage_partial_stages", [])
+                if stage_key not in done_stages:
+                    qty = float(pos.get("qty") or 0)
+                    close_fraction = float(decision.get("close_fraction") or 0.5)
+                    close_qty = qty * close_fraction
+                    if qty > 0 and close_qty > 0:
+                        done_stages.append(stage_key)
+                        pos["qty"] = max(0.0, qty - close_qty)
+                        pos["dynamic_exit_layer"] = {"layer": "DAMAGE_REDUCER_PARTIAL", **decision,
+                                                     "at": now.isoformat(), "mark": mark}
+                        _persist_positions(self.positions)
+                        await self._realize_partial(pos, mark, close_qty, f"DAMAGE_REDUCER_{decision['reason']}")
+                        return True
+            if decision["time_due"] and (decision["pct_due"] or decision.get("current_r", 0) <= decision.get("normal_min_adverse_r", -0.45) or decision.get("mfe_giveback") or decision.get("local_bottom_guard")):
+                bucket = int(hold_min // 15)
+                wait_key = f"{decision['reason']}:{bucket}"
+                if pos.get("damage_wait_last_key") != wait_key:
+                    pos["damage_wait_last_key"] = wait_key
+                    logger.info(
+                        "[DAMAGE_WAIT] %s %s | hold=%.0fm pnl=%+.2f%% r=%+.2f evidence=%s",
+                        symbol, decision["reason"], hold_min, unrealized * 100.0,
+                        decision.get("current_r", 0), decision.get("reversal_evidence", []),
+                    )
 
         # ── 3. PROFIT_LOCK — move SL to breakeven+buffer once in profit ─────
         # TP1-GATED: Only lock after TP1 hit to avoid premature locks from volatility spikes

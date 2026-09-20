@@ -73,13 +73,16 @@ class GatewayTraderShim:
         result = await self.client.execute(intent)
         if result.get("ok"):
             trader = result.get("trader_response") or {}
-            fill_entry = float(trader.get("entry_price") or 0.0)
-            fill_notional = float(trader.get("notional") or 0.0)
+            fill_entry = float(trader.get("entry_price") or result.get("entry_price") or 0.0)
+            fill_notional = float(trader.get("notional") or result.get("notional") or 0.0)
+            confirmed = bool(result.get("position_confirmed") or trader.get("position_confirmed")) or (
+                fill_entry > 0 and fill_notional > 0
+            )
             return {
                 **result,
                 "entry_price": fill_entry,
                 "notional": fill_notional,
-                "position_confirmed": fill_entry > 0 and fill_notional > 0,
+                "position_confirmed": confirmed,
             }
         logger.info("[SIGNAL_COPY->GW] rejected %s: %s", intent.symbol, result.get("reason"))
         return result

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from gateway.order_intent import OrderIntent
+from execution.manual_signal_tools import fetch_manual_signal_context, normalize_manual_tp_ladder
 
 logger = logging.getLogger("gateway")
 
@@ -34,6 +35,13 @@ def trader_rejected(response) -> bool:
         isinstance(response, dict)
         and not response.get("ok", response.get("success", True))
     )
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 @dataclass
@@ -60,6 +68,7 @@ class GatewayResult:
             "risk_amount": self.risk_amount,
             "trader_response": self.trader_response,
             "risk_details": self.risk_details,
+            "position_confirmed": self.position_confirmed,
         }
 
 
@@ -99,10 +108,13 @@ class ExecutionGateway:
         entry = float(intent.entry_price)
         sl = float(intent.sl_price)
 
+        if intent.source == "MANUAL" and os.getenv("GATEWAY_ENRICH_MANUAL_SIGNALS", "true").lower() in ("1", "true", "yes"):
+            await self._enrich_manual_intent(intent, symbol, side, entry, sl)
+
         # Independent Arm C paper book observes every valid Signal Copy intent before
         # canonical capacity/risk gates. Failure never changes canonical decision.
         if (intent.source == "SIGNAL_COPY" and
-                os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes")):
+                os.getenv("GATEWAY_PAPER_MAINNET", "false").lower() in ("1", "true", "yes")):
             try:
                 if self.smart_virtual_book is None:
                     from execution.smart_virtual_portfolio import SmartVirtualPortfolioBook
@@ -144,9 +156,18 @@ class ExecutionGateway:
         if size_err:
             res.reason = size_err
             return self._record(intent, res)
+        # Fetch fresh execution provenance when the selected trader exposes it.
+        price_quote = None
+        if callable(getattr(self.trader, "_get_fresh_open_quote", None)):
+            try:
+                _, price_quote = await self._paper_fill_entry(symbol, side, entry)
+            except (TypeError, ValueError) as exc:
+                res.reason = f"PRICE_VALIDATION_FAILED: {exc}"
+                return self._record(intent, res)
+
         # Paper HARD_SL economic risk = adverse entry + adverse exit@SL + round-trip fees.
         # Size/reserve on that, not raw signal distance — LAUSDT blew 1% on fees/exit-slip.
-        if os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes"):
+        if os.getenv("GATEWAY_PAPER_MAINNET", "false").lower() in ("1", "true", "yes"):
             try:
                 notional, risk_amount, price_quote = await self._paper_econ_size(
                     symbol, side, entry, sl, notional, intent.source,
@@ -160,7 +181,7 @@ class ExecutionGateway:
         # 4) build the trader payload (same keys signal_copy already uses,
         #    so BinanceTestnetTrader needs ZERO changes)
         payload = self._build_payload(intent, entry, sl, side, notional, risk_amount)
-        if os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes"):
+        if price_quote is not None:
             payload["execution_price_quote"] = price_quote
 
         if dry_run:
@@ -190,6 +211,7 @@ class ExecutionGateway:
             res.reason = f"submit_open error: {exc}"
             return self._record(intent, res)
 
+        res.trader_response = opened if isinstance(opened, dict) else {"raw": str(opened)}
         if trader_rejected(opened):
             await self._safe_release(symbol)
             reason_detail = ""
@@ -198,13 +220,24 @@ class ExecutionGateway:
             elif isinstance(opened, dict) and opened.get("reason"):
                 reason_detail = f" | {opened['reason']}"
             res.reason = f"trader rejected open: no position created{reason_detail}"
-            res.trader_response = opened if isinstance(opened, dict) else {"raw": str(opened)}
             logger.warning("[GATEWAY] %s %s: %s", symbol, side, res.reason)
             return self._record(intent, res)
 
+        trader_response = opened if isinstance(opened, dict) else {}
+        fill_entry = _safe_float(trader_response.get("entry_price", 0.0))
+        fill_notional = _safe_float(trader_response.get("notional", 0.0))
+        position_confirmed = bool(trader_response.get("position_confirmed")) or (
+            fill_entry > 0 and fill_notional > 0
+        )
+        if not position_confirmed:
+            await self._safe_release(symbol)
+            res.reason = "trader accepted but no position confirmed"
+            res.position_confirmed = False
+            logger.warning("[GATEWAY] %s %s: %s response=%s", symbol, side, res.reason, res.trader_response)
+            return self._record(intent, res)
+
         try:
-            actual_fill_risk = (opened.get("max_loss_usd_at_fill")
-                                if isinstance(opened, dict) else None)
+            actual_fill_risk = trader_response.get("max_loss_usd_at_fill", trader_response.get("actual_risk_amount"))
             committed_risk = float(actual_fill_risk) if actual_fill_risk is not None else risk_amount
             await self.risk_mgr.commit_open_trade(symbol, risk_amount=committed_risk, is_vip=intent.is_vip)
         except Exception as exc:
@@ -212,10 +245,13 @@ class ExecutionGateway:
 
         res.ok = True
         res.reason = "opened"
-        res.position_confirmed = True  # Signal orchestrator that position was confirmed
-        res.trader_response = opened if isinstance(opened, dict) else {"raw": str(opened)}
+        res.position_confirmed = True
+        if fill_notional > 0:
+            res.notional = fill_notional
+        if trader_response.get("actual_risk_amount") is not None:
+            res.risk_amount = _safe_float(trader_response.get("actual_risk_amount"))
         logger.info("[GATEWAY] OPENED %s src=%s %s notional=%.2f risk=%.2f intent=%s",
-                    symbol, intent.source, side, notional, risk_amount, intent.intent_id)
+                    symbol, intent.source, side, res.notional, res.risk_amount, intent.intent_id)
         return self._record(intent, res)
 
     def portfolio(self) -> Dict[str, Any]:
@@ -296,13 +332,11 @@ class ExecutionGateway:
     ):
         slipped_entry, quote = await self._paper_fill_entry(symbol, side, entry)
         risk_amount = self._paper_hard_sl_econ(side, slipped_entry, sl, notional)
-        if source == "SIGNAL_COPY":
-            current_equity = float(self.risk_mgr.get_current_equity())
-            max_trade_risk = current_equity * 0.01
-            if risk_amount > max_trade_risk and risk_amount > 0:
-                scale = max_trade_risk / risk_amount
-                notional = float(notional) * scale
-                risk_amount = self._paper_hard_sl_econ(side, slipped_entry, sl, notional)
+        strict_risk_cap = max(0.0, _safe_float(os.getenv("SIGNALCOPY_RISK_PER_TRADE_USD"), 2.0))
+        if strict_risk_cap > 0 and risk_amount > strict_risk_cap and risk_amount > 0:
+            scale = strict_risk_cap / risk_amount
+            notional = float(notional) * scale
+            risk_amount = self._paper_hard_sl_econ(side, slipped_entry, sl, notional)
         return float(notional), float(risk_amount), quote
 
     def _size(self, intent: OrderIntent, entry: float, sl: float, side: str):
@@ -311,44 +345,75 @@ class ExecutionGateway:
         if sl_frac <= 0:
             return 0.0, 0.0, "SL distance is zero"
 
-        # Per-position notional cap: no single trade may consume more than
-        # max_notional_pct of equity. This is the fix for the exposure-lock bug
-        # where an explicit `notional` (from signal_copy sizing) bypassed the cap
-        # entirely and one BTC position ate 91% of the book. The cap now applies
-        # to BOTH the explicit-notional path and the risk_pct path.
-        # Config: MAX_NOTIONAL_PCT_OF_BALANCE. Value may be stored as a percent
-        # (e.g. 20.0) or a fraction (0.20) -> normalize both to a fraction.
         try:
             equity = float(self.risk_mgr.get_current_equity())
         except Exception as exc:
             return 0.0, 0.0, f"cannot read equity: {exc}"
+
+        risk_cap_usd = max(0.0, _safe_float(os.getenv("SIGNALCOPY_RISK_PER_TRADE_USD"), 2.0))
+        if risk_cap_usd <= 0:
+            return 0.0, 0.0, "SIGNALCOPY_RISK_PER_TRADE_USD must be greater than zero"
+
         _mnp = getattr(self.risk_mgr, "max_notional_pct", 0.20)
         _frac = (_mnp / 100.0) if _mnp > 1 else _mnp
         _frac = _frac if _frac > 0 else 0.20
-        cap = max(10.0, equity * _frac) if equity > 0 else None
+        notional_cap = max(10.0, equity * _frac) if equity > 0 else None
+        risk_notional_cap = risk_cap_usd / sl_frac
+        min_notional = max(0.0, _safe_float(os.getenv("GATEWAY_MIN_NOTIONAL_USD"), 10.0))
 
         if intent.notional is not None:
             notional = float(intent.notional)
-            if intent.source == "SIGNAL_COPY":
-                notional = min(notional, equity * 0.01 / sl_frac)
-            if cap is not None:
-                notional = min(notional, cap)
-            return notional, notional * sl_frac, None
+        else:
+            if equity <= 0:
+                return 0.0, 0.0, "equity is zero"
+            risk_budget = min(equity * float(intent.risk_pct), risk_cap_usd)
+            notional = risk_budget / sl_frac
 
-        # size from risk_pct against the INTENT's own stop (like signal_copy does)
-        if equity <= 0:
-            return 0.0, 0.0, "equity is zero"
+        notional = min(notional, risk_notional_cap)
+        if notional_cap is not None:
+            notional = min(notional, notional_cap)
 
-        risk_budget = equity * float(intent.risk_pct)
-        notional = risk_budget / sl_frac
-        if cap is not None:
-            notional = min(notional, cap)
-        notional = max(10.0, notional)
-        return notional, notional * sl_frac, None
+        if min_notional > 0 and notional < min_notional:
+            min_risk = min_notional * sl_frac
+            if min_risk > risk_cap_usd:
+                return 0.0, 0.0, (
+                    f"min order notional ${min_notional:.2f} would risk ${min_risk:.2f}, "
+                    f"above strict ${risk_cap_usd:.2f} cap"
+                )
+            notional = min_notional
+
+        risk_amount = notional * sl_frac
+        if risk_amount > risk_cap_usd + 1e-9:
+            return 0.0, 0.0, f"sizing exceeds strict ${risk_cap_usd:.2f} risk cap"
+        return notional, risk_amount, None
+
+    async def _enrich_manual_intent(self, intent: OrderIntent, symbol: str, side: str, entry: float, sl: float) -> None:
+        snapshot = dict(intent.adv_snapshot or {})
+        timeframe = str(snapshot.get("signal_timeframe") or snapshot.get("timeframe") or os.getenv("MANUAL_SIGNAL_TIMEFRAME", "15m"))
+        metrics = await fetch_manual_signal_context(symbol, side, timeframe=timeframe)
+        snapshot.update({k: v for k, v in metrics.items() if v is not None})
+        snapshot.setdefault("signal_timeframe", timeframe)
+        snapshot.setdefault("manual_context_version", "manual_context_v4")
+        snapshot.setdefault("setup_type", os.getenv("MANUAL_DEFAULT_SETUP_TYPE", "EARLY_ENTRY").upper())
+        snapshot.setdefault("scratch_exit_profile", "STRUCTURE_HOLD")
+        snapshot.setdefault("manual_entry", True)
+        snapshot.setdefault("manual_entry_price", entry)
+        snapshot.setdefault("manual_stop_loss", sl)
+        intent.adv_snapshot = snapshot
+        if snapshot.get("regime_label") and not intent.regime:
+            intent.regime = str(snapshot["regime_label"])
+        score = _safe_float(snapshot.get("validation_score"), 0.0)
+        if score > 0:
+            intent.confidence = max(float(intent.confidence or 0.0), min(score / 100.0, 1.0))
 
     def _build_payload(self, intent: OrderIntent, entry: float, sl: float,
                        side: str, notional: float, risk_amount: float) -> Dict[str, Any]:
         tps = [float(t) for t in (intent.tps or [])]
+        if intent.source == "MANUAL" and os.getenv("GATEWAY_NORMALIZE_MANUAL_TPS", "true").lower() in ("1", "true", "yes"):
+            tps, tp_plan = normalize_manual_tp_ladder(side, entry, sl, tps)
+            intent.adv_snapshot = dict(intent.adv_snapshot or {})
+            intent.adv_snapshot["manual_tp_plan"] = tp_plan
+            intent.adv_snapshot["signal_tp_ladder"] = list(tps)
         tp_payload = {f"tp{i}": tp for i, tp in enumerate(tps, start=1)}
         tp_full = tps[-1] if tps else 0.0
         payload: Dict[str, Any] = {

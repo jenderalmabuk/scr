@@ -19,6 +19,8 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 # Copy fusionnew engine code (adversarial bull/bear only)
 COPY --chown=nexus:nexus fusionnew/ ./fusionnew/
+# Copy nexus data bridge for manual/imported signal enrichment
+COPY --chown=nexus:nexus nexus/ ./nexus/
 # Copy gateway for execution routing
 COPY --chown=nexus:nexus gateway/ ./gateway/
 # Copy execution layer (BinanceTestnetTrader)

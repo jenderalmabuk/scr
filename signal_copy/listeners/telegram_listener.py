@@ -15,13 +15,14 @@ Configure via signal_copy/signal_copy_config.py.
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 from typing import Awaitable, Callable, List, Optional
 
 from utils.logger import logger
 
-# message callback: (text, source_name, chat_id) -> awaitable
-MessageCallback = Callable[[str, str, Optional[int]], Awaitable[None]]
+# message callback: (text, source_name, chat_id, image) -> awaitable
+MessageCallback = Callable[[str, str, Optional[int], Optional[bytes]], Awaitable[None]]
 
 
 class TelegramSignalListener:
@@ -86,7 +87,16 @@ class TelegramSignalListener:
                 if self.channels and chat_id not in self.channels:
                     return
                 text = event.raw_text or ""
-                if not text.strip():
+                # Capture an attached chart image (photos only, to avoid
+                # downloading large docs/videos) for vision enrichment.
+                image = None
+                try:
+                    if getattr(event.message, "photo", None):
+                        image = await event.message.download_media(file=bytes)
+                except Exception as exc:
+                    logger.debug("[TG_LISTENER] image download failed: %s", exc)
+                    image = None
+                if not text.strip() and image is None:
                     return
                 try:
                     if getattr(event.message, "reply_to_msg_id", None):
@@ -97,15 +107,6 @@ class TelegramSignalListener:
                                 text += "\n" + marker
                 except Exception:
                     pass
-                # Capture an attached chart image (photos only, to avoid
-                # downloading large docs/videos) for vision enrichment.
-                image = None
-                try:
-                    if getattr(event.message, "photo", None):
-                        image = await event.message.download_media(file=bytes)
-                except Exception as exc:
-                    logger.debug("[TG_LISTENER] image download failed: %s", exc)
-                    image = None
                 name = self._name_for(chat_id)
                 await self.on_message(text, name, chat_id, image)
             except Exception as exc:
@@ -138,10 +139,19 @@ class TelegramSignalListener:
                 if self.channels and message.chat.id not in self.channels:
                     return
                 text = (message.text or message.caption or "")
-                if not text.strip():
+                image = None
+                try:
+                    if getattr(message, "photo", None):
+                        buf = io.BytesIO()
+                        await self._bot.download(message.photo[-1], destination=buf)
+                        image = buf.getvalue()
+                except Exception as exc:
+                    logger.debug("[TG_LISTENER] aiogram image download failed: %s", exc)
+                    image = None
+                if not text.strip() and image is None:
                     return
                 name = self._name_for(message.chat.id, message.chat.title or "")
-                await self.on_message(text, name, message.chat.id)
+                await self.on_message(text, name, message.chat.id, image)
             except Exception as exc:
                 logger.exception("[TG_LISTENER] aiogram handler error: %s", exc)
 

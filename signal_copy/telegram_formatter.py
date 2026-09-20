@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 from typing import Any, Dict
 
-from signal_copy.signal_copy_config import DRY_RUN
+from signal_copy.signal_copy_config import ADVERSARIAL_MODE, DRY_RUN
 
 _RAW_CAP = 700  # keep total report under Telegram's 4096 limit
 
@@ -239,6 +239,29 @@ def _btc_context_label(payload: Dict[str, Any]) -> str:
     return _normalize_btc_context(raw)
 
 
+def _build_committee_block(committee: Dict[str, Any]) -> list[str]:
+    mode = _safe_str(committee, "mode", default="shadow").lower()
+    if mode in {"shadow", "off"}:
+        return []
+    final_vote = _safe_str(committee, "final_vote", default="UNKNOWN").upper()
+    action = _safe_str(committee, "action", default="NONE").upper()
+    score = _safe_float(committee, "score", default=0.0)
+    no_votes = _safe_int(committee, "no_votes", default=0)
+    warn_votes = _safe_int(committee, "warn_votes", default=0)
+    lines = [
+        "",
+        f"<b>COMMITTEE: {html.escape(final_vote)}</b> ({html.escape(mode)})",
+        f"   Risk: {score:.0f}/100 | NO: {no_votes} | WARN: {warn_votes}",
+    ]
+    reasons = committee.get("top_reasons") or []
+    if reasons:
+        lines.append("   Top reasons:")
+        for reason in reasons[:3]:
+            lines.append(f"      • {html.escape(str(reason)[:180])}")
+    lines.append(f"   Action: {html.escape(action)}")
+    return lines
+
+
 def build_parser_report(
     sig: Any,
     result: Any,
@@ -246,6 +269,7 @@ def build_parser_report(
     source_name: str = "",
     calib: bool = False,
     adversarial_verdict: str = "",
+    committee: Dict[str, Any] | None = None,
 ) -> str:
     """Build ONE consolidated report: parse + validation + adversarial."""
     symbol = getattr(sig, "symbol", "UNKNOWN").upper()
@@ -356,6 +380,23 @@ def build_parser_report(
     # Section 2: Validation score
     lines.append("📊 <b>HASIL VALIDASI</b>")
     lines.append(f"   Skor: <b>{score:+.1f}/100</b>")
+    dynamic_risk = metrics.get("dynamic_risk_usd")
+    sizing_tier = metrics.get("sizing_tier")
+    if dynamic_risk is not None:
+        tier_label = {
+            "TIER_1_HIGH": "Tier 1: High Conviction",
+            "TIER_2_MODERATE": "Tier 2: Moderate",
+            "TIER_3_PROBE": "Tier 3: Probe/Low",
+            "VETO": "VETO (0% - Fakeout/Toxic)",
+        }.get(sizing_tier, str(sizing_tier))
+        lines.append(f"   💰 Alokasi Risk: <b>${dynamic_risk:.2f}</b> ({tier_label})")
+    entry_action = metrics.get("entry_action_preview") or metrics.get("entry_action")
+    entry_code = metrics.get("entry_route_code_preview") or metrics.get("entry_route_code")
+    entry_conflicts = metrics.get("entry_route_conflicts_preview") or metrics.get("entry_route_conflicts") or []
+    if entry_action:
+        lines.append(f"   Entry action: <b>{html.escape(str(entry_action))}</b> ({html.escape(str(entry_code or '-'))})")
+        if entry_conflicts:
+            lines.append("   Konflik entry: " + ", ".join(html.escape(str(x)) for x in entry_conflicts[:3]))
     if mtf_score:
         lines.append(f"   MTF: {mtf_score:.0f}/100 | TV: {tv_score:.0f}/100")
     if hard_blocks:
@@ -399,22 +440,29 @@ def build_parser_report(
     elif btc_corr:
         lines.append(f"   BTC Corr: {btc_corr:.2f}")
 
-    # Section 4: Adversarial (if any). The judge said NO; HOW that NO was
-    # applied is already encoded in the FINAL verdict, so the card must reflect
-    # the real outcome instead of always printing "REJECT":
-    #   VALID  -> soft-override (score >= floor): entry WAS opened anyway
-    #   WEAK   -> soft-downgrade (score < floor): NOT executed
-    #   REJECT -> hard block: NOT executed
+    # Section 4: Adversarial (if any). Legacy adversarial only runs after the
+    # deterministic validator says VALID. In off mode it is advisory-only, so do
+    # not imply it opened/blocked anything; calibration mode also never executes.
     if adversarial_verdict:
         lines.append("")
-        if verdict == "VALID":
-            lines.append("⚠️ <b>ADVERSARIAL: NO — DI-OVERRIDE, ENTRY TETAP DIBUKA</b>")
-            lines.append("   Skor ≥ floor (soft-mode): setup high-conviction, trade DIEKSEKUSI meski adversarial menolak.")
+        adv_mode = str(ADVERSARIAL_MODE or "off").lower()
+        if adv_mode == "off":
+            lines.append("⚠️ <b>ADVERSARIAL: NO — ADVISORY ONLY</b>")
+            lines.append("   Mode off: catatan risiko saja, tidak mengubah verdict/entry.")
+        elif verdict == "VALID":
+            lines.append("⚠️ <b>ADVERSARIAL: NO — DI-OVERRIDE</b>")
+            if calib:
+                lines.append("   Skor ≥ floor (soft-mode), tapi ini KALIBRASI: tidak ada eksekusi.")
+            else:
+                lines.append("   Skor ≥ floor (soft-mode): setup high-conviction, entry tetap diizinkan.")
         elif verdict == "WEAK":
             lines.append("🚫 <b>ADVERSARIAL: NO → downgrade WEAK — TIDAK dieksekusi</b>")
         else:
             lines.append("🚫 <b>ADVERSARIAL: REJECT — entry DIBLOKIR</b>")
         lines.append(f"   {adversarial_verdict[:300]}")
+
+    if committee:
+        lines.extend(_build_committee_block(committee))
 
     # Section 5: Calib note
     if calib and verdict == "VALID" and not adversarial_verdict:

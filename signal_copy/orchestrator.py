@@ -382,6 +382,9 @@ class SignalCopyOrchestrator:
         if update.kind in (UpdateKind.MOVE_SL_BE, UpdateKind.MOVE_SL_PRICE):
             new_sl = float(pos["entry_price"] if update.kind == UpdateKind.MOVE_SL_BE else (update.price or 0.0))
             result = await client.position_action(update.symbol, "MOVE_SL", new_sl)
+        elif update.kind == UpdateKind.REMOVE_SL:
+            result = await client.position_action(update.symbol, "MOVE_SL", 0.0)
+            await self._notify_trades_channel(f"ℹ️ PROVIDER {update.symbol}: SL sementara dihilangkan atas instruksi provider")
         elif update.kind == UpdateKind.CLOSE:
             result = await client.position_action(update.symbol, "CLOSE")
         else:
@@ -456,6 +459,11 @@ class SignalCopyOrchestrator:
         # Structured trade call: emit a detailed read report (always logged;
         # optionally pushed to Telegram for calibration via SIGNAL_COPY_PARSE_REPORT).
         logger.info("[SIGNAL_COPY] %s", build_read_report(text, cls, sig))
+        # Filter toxic pairs specifically for pilot channel -1001652601224
+        if source_chat_id == -1001652601224 and sig and sig.symbol in {"SYNUSDT", "ZENUSDT"}:
+            logger.info("[SIGNAL_COPY] %s filtered by pilot channel toxic pair blacklist", sig.symbol)
+            return
+
         if not calib and self._is_duplicate(sig):
             logger.info("[SIGNAL_COPY] duplicate signal ignored: %s", sig.summary())
             from . import signal_lifecycle
@@ -556,6 +564,30 @@ class SignalCopyOrchestrator:
         except Exception as exc:
             logger.warning("[SIGNAL_COPY] normalize failed: %s", exc)
         result = validate_signal(sig, metrics)
+        channel_score_adjustment = scfg.channel_score_adjustment(sig.source_chat_id)
+        if channel_score_adjustment:
+            raw_score = float(result.score or 0.0)
+            adjusted_score = max(0.0, min(100.0, raw_score + channel_score_adjustment))
+            result.score = adjusted_score
+            metrics["validation_score_raw"] = raw_score
+            metrics["channel_score_adjustment"] = channel_score_adjustment
+            result.metrics_snapshot["validation_score_raw"] = raw_score
+            result.metrics_snapshot["channel_score_adjustment"] = channel_score_adjustment
+            if not result.hard_blocks:
+                from . import validation_config as vc
+                if adjusted_score >= vc.VALID_THRESHOLD:
+                    result.verdict = Verdict.VALID
+                elif adjusted_score >= vc.WEAK_THRESHOLD:
+                    result.verdict = Verdict.WEAK
+                else:
+                    result.verdict = Verdict.REJECT
+            logger.info(
+                "[CHANNEL_SCORE] %s source=%s raw=%.1f adj=%+.1f final=%.1f verdict=%s",
+                sig.symbol, sig.source_chat_id, raw_score, channel_score_adjustment,
+                result.score, result.verdict.value,
+            )
+        metrics["validation_score"] = result.score
+        result.metrics_snapshot["validation_score"] = result.score
         logger.info("[SIGNAL_COPY] %s -> %s score=%.1f (tp=%s sl=%s entry=%s tf=%s) reasons=%s",
                     sig.symbol, result.verdict.value, result.score,
                     sig.tp_source, sig.sl_source, sig.entry_type, sig.timeframe or "-",
@@ -570,6 +602,8 @@ class SignalCopyOrchestrator:
         # --- Build ONE consolidated report and send ---
         from .telegram_formatter import build_parser_report
         _adv_verdict = ""
+        _legacy_adv_result = None
+        _committee = None
         chart_path = None
 
         # --- ADVERSARIAL CHECK (only for VALID signals) ---
@@ -613,6 +647,11 @@ class SignalCopyOrchestrator:
                 approved, judge_verdict = await asyncio.to_thread(
                     bull_bear_check, sig.symbol, adv_context
                 )
+                _legacy_adv_result = {
+                    "enabled": True,
+                    "approved": bool(approved),
+                    "reason": judge_verdict,
+                }
 
                 _adv_mode = getattr(scfg, "ADVERSARIAL_MODE", "soft")
                 _adv_floor = getattr(scfg, "ADVERSARIAL_SOFT_FLOOR", 75.0)
@@ -644,13 +683,122 @@ class SignalCopyOrchestrator:
                     logger.info("[ADVERSARIAL] APPROVED: %s", judge_verdict[:200])
                    
             except Exception as exc:
+                _legacy_adv_result = {"enabled": True, "approved": True, "error": str(exc)}
                 logger.warning("[ADVERSARIAL] Check failed (proceeding anyway): %s", exc)
+
+        # --- Adversarial committee (shadow/advisory first; deterministic) ---
+        if getattr(scfg, "COMMITTEE_ENABLED", False):
+            try:
+                verdict_key = result.verdict.value if hasattr(result.verdict, "value") else str(result.verdict).upper()
+                run_on = getattr(scfg, "COMMITTEE_RUN_ON_VERDICTS", {"VALID", "WEAK"}) or {"VALID", "WEAK"}
+                if verdict_key in run_on:
+                    from .adversarial_committee import (
+                        ACTION_DOWNGRADE,
+                        ACTION_REJECT,
+                        evaluate_committee,
+                        record_decision,
+                    )
+                    committee = evaluate_committee(
+                        sig, result, metrics,
+                        legacy_result=_legacy_adv_result if getattr(scfg, "COMMITTEE_LEGACY_COMPARE", True) else None,
+                    )
+                    _committee = committee.to_dict()
+                    metrics["adversarial_committee"] = _committee
+                    result.metrics_snapshot["adversarial_committee"] = _committee
+                    if _legacy_adv_result:
+                        metrics["legacy_adversarial"] = _legacy_adv_result
+                        result.metrics_snapshot["legacy_adversarial"] = _legacy_adv_result
+                    signal_lifecycle.record(
+                        sig.signal_id,
+                        "COMMITTEE_EVALUATED",
+                        committee=_committee,
+                    )
+                    record_decision(sig, result, committee, metrics)
+                    if getattr(scfg, "COMMITTEE_MODE", "shadow") != "shadow":
+                        if committee.action == ACTION_DOWNGRADE:
+                            result.verdict = Verdict.WEAK
+                        elif committee.action == ACTION_REJECT:
+                            result.verdict = Verdict.REJECT
+                            result.hard_blocks.append(
+                                "Committee: " + "; ".join(committee.top_reasons(2))[:250]
+                            )
+            except Exception as exc:
+                logger.warning("[COMMITTEE] evaluation failed (proceeding anyway): %s", exc)
         
+        # --- Auto-entry policy: keep quality scoring separate, but downgrade
+        # live auto-exec when strong conflicts are not high-score enough to override.
+        if result.verdict == Verdict.VALID:
+            try:
+                from . import validation_config as vc
+                policy_reasons = []
+                score = float(result.score or 0.0)
+                adversarial_mode = str(getattr(scfg, "ADVERSARIAL_MODE", "off") or "off").lower()
+                committee_mode = str(getattr(scfg, "COMMITTEE_MODE", "shadow") or "shadow").lower()
+                if (adversarial_mode != "off" and _legacy_adv_result and _legacy_adv_result.get("approved") is False
+                        and score < vc.ADVERSARIAL_NO_OVERRIDE_MIN_SCORE):
+                    policy_reasons.append("ADVERSARIAL_NO_BELOW_OVERRIDE_SCORE")
+                if committee_mode != "shadow" and isinstance(_committee, dict):
+                    final_vote = str(_committee.get("final_vote") or "").upper()
+                    warn_votes = int(_committee.get("warn_votes") or 0)
+                    no_votes = int(_committee.get("no_votes") or 0)
+                    if final_vote == "NO" and score < vc.ADVERSARIAL_NO_OVERRIDE_MIN_SCORE:
+                        policy_reasons.append("COMMITTEE_NO_BELOW_OVERRIDE_SCORE")
+                    elif (warn_votes >= vc.COMMITTEE_WARN_DOWNGRADE_COUNT or no_votes > 0) and score < vc.AUTO_MARKET_MIN_SCORE:
+                        policy_reasons.append("COMMITTEE_WARN_BELOW_MARKET_SCORE")
+                flow = str(metrics.get("flow_direction") or "").upper().replace(" ", "_")
+                if vc.FLOW_NO_TRADE_MARKET_BLOCK and flow == "NO_TRADE" and score < vc.AUTO_MARKET_MIN_SCORE:
+                    policy_reasons.append("FLOW_NO_TRADE_BELOW_MARKET_SCORE")
+                if policy_reasons:
+                    result.verdict = Verdict.WEAK
+                    result.hard_blocks.extend([f"Auto-entry policy: {r}" for r in policy_reasons])
+                    metrics["auto_entry_policy_reasons"] = policy_reasons
+                    result.metrics_snapshot["auto_entry_policy_reasons"] = policy_reasons
+                    signal_lifecycle.record(
+                        sig.signal_id,
+                        "AUTO_ENTRY_POLICY_DOWNGRADE",
+                        score=score,
+                        reasons=policy_reasons,
+                    )
+            except Exception as exc:
+                logger.warning("[ENTRY_POLICY] precheck failed (proceeding): %s", exc)
+
+        if result.verdict == Verdict.VALID:
+            try:
+                from .entry_policy import route_entry as _preview_route
+                preview = _preview_route(
+                    sig,
+                    _f(metrics.get("price")),
+                    validation_score=result.score,
+                    metrics={**metrics, **(result.metrics_snapshot or {})},
+                )
+                metrics["entry_action_preview"] = preview.action.value
+                metrics["entry_route_code_preview"] = preview.code
+                result.metrics_snapshot["entry_action_preview"] = preview.action.value
+                result.metrics_snapshot["entry_route_code_preview"] = preview.code
+                result.metrics_snapshot["entry_route_conflicts_preview"] = list(preview.conflicts or [])
+            except Exception as exc:
+                logger.debug("[ENTRY_POLICY] preview skipped: %s", exc)
+
+        # Compute Dynamic Risk Preview
+        try:
+            max_r = float(os.getenv("SIGNALCOPY_RISK_PER_TRADE_USD", "2.0"))
+            dyn_risk, dyn_tier, dyn_det = self.sizer.calc_risk_usd(
+                sig, metrics, max_risk_usd=max_r, validation_score=result.score
+            )
+            metrics["dynamic_risk_usd"] = dyn_risk
+            metrics["sizing_tier"] = dyn_tier
+            result.metrics_snapshot["dynamic_risk_usd"] = dyn_risk
+            result.metrics_snapshot["sizing_tier"] = dyn_tier
+            result.metrics_snapshot["sizing_details"] = dyn_det
+        except Exception as exc:
+            logger.debug("[DYNAMIC_SIZING] preview skipped: %s", exc)
+
         # --- Build ONE consolidated report and send ---
         consolidated = build_parser_report(
             sig, result, cls, source_name,
             calib=calib,
             adversarial_verdict=_adv_verdict,
+            committee=_committee,
         )
         try:
             from .chart_generator import build_chart
@@ -801,7 +949,17 @@ class SignalCopyOrchestrator:
         logger.info("[EXEC_ROUTE] %s %s signal_id=%s price=%.8g source=%s",
                     sig.symbol, sig.side.value, signal_id, price,
                     live_metrics.get("price_source"))
-        routing = route_entry(sig, price)
+        routing = route_entry(
+            sig,
+            price,
+            validation_score=pc.result.score,
+            metrics=pc.result.metrics_snapshot or {},
+        )
+        pc.result.metrics_snapshot.update({
+            "entry_action": routing.action.value,
+            "entry_route_code": routing.code,
+            "entry_route_conflicts": list(routing.conflicts or []),
+        })
         if routing.action == EntryAction.REJECT:
             await self.confirmations.mark(signal_id, ConfirmState.EXPIRED, note=routing.code)
             from . import pending_journal
@@ -810,6 +968,24 @@ class SignalCopyOrchestrator:
             logger.warning("[EXEC_ROUTE] rejected %s %s signal_id=%s reason=%s price=%.8g",
                            sig.symbol, sig.side.value, signal_id, routing.code, price)
             msg = f"✅ VALIDATED tapi ❌ NOT FILLED {sig.side.value} {sig.symbol}\nReason: {routing.code}"
+            await self._notify_trades_channel(msg)
+            return msg
+        if routing.action == EntryAction.WAIT_CONFIRMATION:
+            await self.confirmations.mark(signal_id, ConfirmState.EXPIRED, note=routing.code)
+            from . import pending_journal
+            pending_journal.record(
+                "WAIT_CONFIRMATION", sig, price=price, reason=routing.code,
+                conflicts=list(routing.conflicts or []), price_quote=live_metrics,
+            )
+            logger.info(
+                "[EXEC_ROUTE] manual review %s %s signal_id=%s reason=%s score=%.1f conflicts=%s",
+                sig.symbol, sig.side.value, signal_id, routing.code, pc.result.score,
+                routing.conflicts,
+            )
+            msg = (
+                f"⏸️ VALID tapi TIDAK AUTO-EXECUTE {sig.side.value} {sig.symbol}\n"
+                f"Reason: {routing.code}\nButuh konfirmasi/manual review."
+            )
             await self._notify_trades_channel(msg)
             return msg
         sig.active_entry = routing.entry
@@ -870,10 +1046,35 @@ class SignalCopyOrchestrator:
                 logger.error("❌ Pending-limit notify failed: %s", exc)
             return pending_msg
 
+        # Adversarial Dynamic Sizing
+        max_risk = float(os.getenv("SIGNALCOPY_RISK_PER_TRADE_USD", "2.0"))
+        target_risk_usd, sizing_tier, sizing_details = self.sizer.calc_risk_usd(
+            pc.result.signal,
+            pc.result.metrics_snapshot or {},
+            max_risk_usd=max_risk,
+            validation_score=pc.result.score,
+        )
+        pc.result.metrics_snapshot["dynamic_risk_usd"] = target_risk_usd
+        pc.result.metrics_snapshot["sizing_tier"] = sizing_tier
+        pc.result.metrics_snapshot["sizing_details"] = sizing_details
+
+        if target_risk_usd <= 0.0 and os.getenv("ADVERSARIAL_SIZING_VETO_ENABLED", "true").lower() == "true":
+            reason_msg = sizing_details.get("reason", "ADVERSARIAL_VETO")
+            logger.info("[EXEC_ROUTE] Blocked by Adversarial Veto %s %s: %s", sig.symbol, sig.side.value, reason_msg)
+            await self.confirmations.mark(signal_id, ConfirmState.EXPIRED, note=reason_msg)
+            msg = (
+                f"🛡️ [ADVERSARIAL VETO] {sig.side.value} {sig.symbol} batal dieksekusi.\n"
+                f"Alasan: {reason_msg}\n"
+                f"CVD: {pc.result.metrics_snapshot.get('cvd_zscore', 0):+.2f} | Modal terlindungi ($0 risk)."
+            )
+            await self._notify_trades_channel(msg)
+            return msg
+
         outcome = await self.executor.execute(
             pc.result,
             dry_run=self.dry_run,
-            risk_pct=self.sizer.calc(pc.result.signal, pc.result.metrics_snapshot or {})
+            risk_pct=self.sizer.calc(pc.result.signal, pc.result.metrics_snapshot or {}),
+            risk_usd=target_risk_usd,
         )
         await self.confirmations.mark(
             signal_id,
@@ -1081,11 +1282,18 @@ class SignalCopyOrchestrator:
             data["path_high"] = max(float(data.get("path_high", price)), price)
             data["path_low"] = min(float(data.get("path_low", price)), price)
             if self._limit_reached(sig, price):
-                from .entry_policy import pending_fill_allowed
-                allowed, drift_r = pending_fill_allowed(sig, price)
                 boundary = float(getattr(sig, "active_entry", None) or sig.entry_mid)
+                sl = float(sig.stop_loss or 0.0)
+                risk = abs(boundary - sl) if sl > 0 else boundary * 0.01
                 adverse = price < boundary if sig.is_long else price > boundary
-                if adverse and not allowed:
+                drift_r = abs(price - boundary) / risk if risk > 0 else 0.0
+                
+                # Check adverse drift (discount): allow up to max_discount_r, block only if dangerously close to SL
+                from . import validation_config as vc
+                max_discount_r = float(getattr(vc, "MAX_DISCOUNT_R", 0.60))
+                too_close_to_sl = (abs(price - sl) < risk * 0.25) if sl > 0 else False
+                
+                if adverse and (drift_r > max_discount_r or too_close_to_sl):
                     from . import pending_journal
                     pending_journal.record("DRIFT_WAITING", sig, price=price,
                                            drift_r=round(drift_r, 4))
@@ -1138,10 +1346,19 @@ class SignalCopyOrchestrator:
                     ConfirmState.APPROVED,
                     note="limit_reached",
                 )
+                # Dynamic risk sizing for pending limit fill
+                max_r = float(os.getenv("SIGNALCOPY_RISK_PER_TRADE_USD", "2.0"))
+                target_risk_usd, _, _ = self.sizer.calc_risk_usd(
+                    pc.signal,
+                    pc.metrics_snapshot or {},
+                    max_risk_usd=max_r,
+                    validation_score=float(getattr(pc, "score", 65.0) or 65.0),
+                )
                 outcome = await self.executor.execute(
                     pc,
                     dry_run=self.dry_run,
                     risk_pct=self.sizer.calc(pc.signal, pc.metrics_snapshot or {}),
+                    risk_usd=target_risk_usd if target_risk_usd > 0 else None,
                 )
                 from . import pending_journal
                 if "MAX_OPEN" in str(outcome.reason).upper():
@@ -1153,7 +1370,7 @@ class SignalCopyOrchestrator:
                 self._pending_limits.pop(token, None)
                 await self.confirmations.mark(
                     token,
-                    ConfirmState.EXECUTED if outcome.ok else ConfirmState.FAILED,
+                    ConfirmState.EXECUTED if outcome.position_confirmed else ConfirmState.FAILED,
                     note=outcome.reason,
                 )
                 pending_journal.record(

@@ -40,3 +40,10 @@ data/
 *.db
 *.sqlite
 .pytest_cache/
+
+# ── temporary / backup files ───────────────────────
+*.bak*
+*.corrupted*
+bots/runtime/
+*.zip
+scratch/

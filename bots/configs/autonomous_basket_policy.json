@@ -1,0 +1,1 @@
+{"entry":"PostOnly-no-chase","executor_sha256":"9e81d9540372b69b5390d88903cd29137c71de2c8c760baf450f257bb3913641","loss_pause":2,"max_entries_day":2,"max_modeled_loss_day_usd":"4","max_modeled_loss_trade_usd":"2","max_open_baskets":1,"partial_tp":false,"protection":"native-single-TP-plus-SL","schema":"nexus.autonomous-basket-policy","starts_at":"2026-08-10T00:00:00Z","version":1}

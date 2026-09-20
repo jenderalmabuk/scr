@@ -47,67 +47,102 @@ class BybitClient:
         endpoint: str,
         method: str = "GET",
         params: Optional[Dict[str, Any]] = None,
-        private: bool = False
+        private: bool = False,
+        *,
+        max_retries: int = 3,
     ) -> Dict[str, Any]:
-        """Make HTTP request to Bybit API."""
+        """Make HTTP request to Bybit API with retry + exponential backoff.
+
+        Retries on:
+          - Network errors (URLError, timeout)
+          - HTTP 429 (rate limited)
+          - HTTP 5xx (server errors)
+        Does NOT retry on:
+          - HTTP 401/403 (auth errors)
+          - Bybit retCode != 0 (business logic error)
+        """
         url = f"{self.BASE_URL}{endpoint}"
         params = params or {}
-        
-        if method == "GET" and params:
-            query = urllib.parse.urlencode(params)
-            url = f"{url}?{query}"
-        
+
         headers = {"Content-Type": "application/json"}
-        
-        if private:
-            timestamp = str(int(time.time() * 1000))
-            
-            if method == "POST":
-                params_str = json.dumps(params) if params else ""
-            else:
-                params_str = urllib.parse.urlencode(sorted(params.items())) if params else ""
-            
-            signature = self._sign(params_str, timestamp)
-            
-            headers.update({
-                "X-BAPI-API-KEY": self.api_key,
-                "X-BAPI-SIGN": signature,
-                "X-BAPI-TIMESTAMP": timestamp,
-                "X-BAPI-RECV-WINDOW": str(self.RECV_WINDOW)
-            })
-        
         request_data = None
+        params_str = ""
+
         if method == "POST" and params:
-            request_data = json.dumps(params).encode('utf-8')
-        
-        request = urllib.request.Request(
-            url,
-            data=request_data,
-            headers=headers,
-            method=method
-        )
-        
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                
-                # Add response timestamp for freshness checks
-                result["_response_ts"] = time.time()
-                
-                if result.get("retCode") != 0:
-                    raise BybitAPIError(
-                        f"API error {result.get('retCode')}: {result.get('retMsg')}"
-                    )
-                
-                return result.get("result", result)
-        
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8')
-            raise BybitAPIError(f"HTTP {e.code}: {error_body}")
-        except urllib.error.URLError as e:
-            raise BybitAPIError(f"Network error: {e.reason}")
-        except Exception as e:
-            raise BybitAPIError(f"Request failed: {str(e)}")
+            params_str = json.dumps(params)
+            request_data = params_str.encode('utf-8')
+        elif method == "GET" and params:
+            # For private GET, Bybit signs the exact query string. Keep the URL
+            # query and signature payload identical so parameter insertion order
+            # cannot cause intermittent 10004 signature errors.
+            params_str = urllib.parse.urlencode(sorted(params.items())) if private else urllib.parse.urlencode(params)
+            url = f"{url}?{params_str}"
+
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(max_retries + 1):
+            # Re-sign on every attempt (timestamp must be fresh)
+            req_headers = dict(headers)
+            if private:
+                timestamp = str(int(time.time() * 1000))
+                signature = self._sign(params_str, timestamp)
+                req_headers.update({
+                    "X-BAPI-API-KEY": self.api_key,
+                    "X-BAPI-SIGN": signature,
+                    "X-BAPI-TIMESTAMP": timestamp,
+                    "X-BAPI-RECV-WINDOW": str(self.RECV_WINDOW)
+                })
+
+            request = urllib.request.Request(
+                url,
+                data=request_data,
+                headers=req_headers,
+                method=method
+            )
+
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    result = json.loads(response.read().decode('utf-8'))
+                    result["_response_ts"] = time.time()
+
+                    if result.get("retCode") != 0:
+                        raise BybitAPIError(
+                            f"API error {result.get('retCode')}: {result.get('retMsg')}"
+                        )
+
+                    return result.get("result", result)
+
+            except urllib.error.HTTPError as e:
+                error_body = e.read().decode('utf-8')
+                last_exc = BybitAPIError(f"HTTP {e.code}: {error_body}")
+                # Don't retry auth errors
+                if e.code in (401, 403):
+                    raise last_exc
+                if e.code == 429 or e.code >= 500:
+                    if attempt < max_retries:
+                        backoff = (2 ** attempt) * 0.5  # 0.5s, 1s, 2s
+                        time.sleep(backoff)
+                        continue
+                raise last_exc
+
+            except urllib.error.URLError as e:
+                last_exc = BybitAPIError(f"Network error: {e.reason}")
+                if attempt < max_retries:
+                    backoff = (2 ** attempt) * 0.5
+                    time.sleep(backoff)
+                    continue
+
+            except BybitAPIError:
+                raise  # Business logic error — don't retry
+
+            except Exception as e:
+                last_exc = BybitAPIError(f"Request failed: {str(e)}")
+                if attempt < max_retries:
+                    backoff = (2 ** attempt) * 0.5
+                    time.sleep(backoff)
+                    continue
+
+        raise last_exc  # All retries exhausted
     
     # Public endpoints
     
@@ -237,6 +272,14 @@ class BybitClient:
             params["symbol"] = symbol
         
         result = self._request("/v5/position/list", params=params, private=True)
+        return result.get("list", [])
+
+    def get_closed_pnl(self, symbol: str = None, category: str = "linear", limit: int = 50) -> list:
+        """Get exchange-authoritative closed PnL rows."""
+        params = {"category": category, "limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        result = self._request("/v5/position/closed-pnl", params=params, private=True)
         return result.get("list", [])
     
     def set_trading_stop(

@@ -1,0 +1,33 @@
+# Bot config — per-engine overrides
+# These map to engine CLI args
+
+# Retired 2026-08-25 after failed paper edge triage:
+# m30_imbalance, h1_imbalance, h1_short_candidate, h1_short_volume2, h1_fusionnew.
+# Evidence: runtime/imbalance/retired_engines_20260825T041435Z.tar.gz
+
+# Retired 2026-08-30 by explicit user directive; only BTC-correlation engine remains.
+# Evidence: runtime/imbalance/retired_non_btc_corr_20260830T162949Z.tar.gz
+
+# Isolated paper candidate: baseline plus pair-specific BTC correlation only.
+m30_fusionnew_btc_corr:
+  tier: M30
+  direction: both
+  symbols_file: runtime/revo/canonical_universe.txt
+  ema_dist: 1.0
+  adversarial: true
+  min_turn: 1000000
+  stoch_max: 0  # disabled 2026-09-02; user-approved density test
+  equity: 1000
+  risk_pct: 0.01
+  max_positions: 6
+  leverage: 5
+  daily_loss_pct: 0.05
+  max_dd_pct: 0.20
+  interval_sec: 300
+  warm_batch: 40
+  cold_batch: 347
+  soft_pending_cap: 20
+  cvd: true
+  btc_regime: true
+  btc_corr: true
+  symbols_file: ../runtime/revo/canonical_universe.txt

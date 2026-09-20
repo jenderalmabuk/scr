@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 
 import httpx
 import logging
@@ -42,8 +43,23 @@ logger = logging.getLogger("fusion_whale_hunter")
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # signal_copy/ -> parent is nexus root
 sys.path.insert(0, root)
 
-# suppress noisy telethon logs
+# suppress noisy dependency logs
 logging.getLogger("telethon").setLevel(logging.WARNING)
+for _noisy_logger in ("httpx", "httpcore"):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+
+
+def _monitor_task(task: asyncio.Task, name: str) -> asyncio.Task:
+    """Add error logging callback to background task so silent deaths are caught."""
+    def _on_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            logger.warning("[TASK] %s was cancelled", name)
+        elif t.exception():
+            logger.error("[TASK] %s died with exception: %s", name, t.exception(),
+                         exc_info=t.exception())
+    task.set_name(name)
+    task.add_done_callback(_on_done)
+    return task
 
 
 async def main():
@@ -128,22 +144,8 @@ async def main():
     orig_execute_token = orch._execute_token
 
     async def patched_execute_token(signal_id: str) -> str:
-        result = await orig_execute_token(signal_id)
-        # Send execution result to trades channel
-        try:
-            # Get the signal and outcome from confirmations
-            pc = await orch.confirmations.get(signal_id)
-            if pc and pc.result:
-                sig = pc.result.signal
-                # outcome is not directly returned, but we can reconstruct
-                # For now, just send a basic execution message
-                from signal_copy.telegram_formatter import build_execution_message
-                from signal_copy.validation_engine import ValidationResult
-                # This will be handled by the orchestrator's built-in notification
-                pass
-        except Exception:
-            pass
-        return result
+        # Notification is already handled by patched_notify below
+        return await orig_execute_token(signal_id)
 
     orch._execute_token = patched_execute_token
 
@@ -174,8 +176,8 @@ async def main():
             except Exception as e:
                 logger.exception("Pending limits poll error: %s", e)
 
-    # Start polling task
-    asyncio.create_task(_poll_pending_limits())
+    # Start polling task (monitored — logs error if task dies)
+    _monitor_task(asyncio.create_task(_poll_pending_limits()), "poll_pending_limits")
     print("[SIGNAL COPY] Pending limits polling started (15s interval)")
 
     # ------------------------------------------------------------------
@@ -191,20 +193,41 @@ async def main():
         except Exception:
             return 0.0
 
+    async def _candles_fn(symbol: str, since_ts: float):
+        api_url = str(getattr(bridge, "api_url", "") or os.getenv("NEXUS_API_URL", "http://localhost:8000")).rstrip("/")
+        age_sec = max(0.0, time.time() - float(since_ts or 0.0))
+        # Enough 1m candles since snapshot, bounded by FastAPI's 2000 limit.
+        limit = max(5, min(2000, int(age_sec / 60.0) + 5))
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            for exchange in ("binance", "bybit"):
+                try:
+                    resp = await client.get(
+                        f"{api_url}/klines/{exchange}/{symbol.upper()}",
+                        params={"tf": "1m", "limit": limit},
+                    )
+                    if resp.status_code != 200:
+                        continue
+                    rows = (resp.json() or {}).get("data") or []
+                    if rows:
+                        return rows
+                except Exception as exc:
+                    logger.debug("[OUTCOME] %s 1m candles fetch failed for %s: %s", exchange, symbol, exc)
+        return []
+
     async def _poll_outcomes():
         from signal_copy.outcome_tracker import get_outcome_tracker
         tracker = get_outcome_tracker()
         while True:
             await asyncio.sleep(60)  # outcomes resolve over hours; 60s is plenty
             try:
-                n = await tracker.resolve_open(_price_fn)
+                n = await tracker.resolve_open(_price_fn, _candles_fn)
                 if n:
                     logger.info("[OUTCOME] resolved %d signal(s); %d still open",
                                 n, tracker.open_count())
             except Exception as e:
                 logger.exception("Outcome poll error: %s", e)
 
-    asyncio.create_task(_poll_outcomes())
+    _monitor_task(asyncio.create_task(_poll_outcomes()), "poll_outcomes")
     print("[SIGNAL COPY] Outcome resolution polling started (60s interval)")
 
     # ------------------------------------------------------------------

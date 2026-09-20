@@ -34,28 +34,42 @@ class TradingViewFactor:
 
         def _fetch_sync():
             ta_result = {}
+            base_symbol = symbol.upper()
+            symbol_candidates = [base_symbol]
+            if not base_symbol.endswith(".P"):
+                symbol_candidates.append(f"{base_symbol}.P")
             for tf_name, interval, _weight in TF_WEIGHTS:
-                try:
-                    handler = TA_Handler(
-                        symbol=symbol.upper(),
-                        screener="crypto",
-                        exchange="BINANCE",
-                        interval=interval,
-                        timeout=12,
-                    )
-                    analysis = handler.get_analysis()
-                    ta_result[f"tf_{tf_name}"] = {
-                        "recommendation": analysis.summary.get("RECOMMENDATION", "NEUTRAL"),
-                        "buy": analysis.summary.get("BUY", 0),
-                        "sell": analysis.summary.get("SELL", 0),
-                        "neutral": analysis.summary.get("NEUTRAL", 0),
-                        "oscillators": analysis.oscillators.get("RECOMMENDATION", "NEUTRAL"),
-                        "moving_averages": analysis.moving_averages.get("RECOMMENDATION", "NEUTRAL"),
-                        "rsi": _safe_rsi(analysis.oscillators.get("COMPUTE", {})),
-                    }
-                except Exception as exc:
-                    logger.debug("[TV_FACTOR] %s %s: %s", symbol, tf_name, exc)
-                    ta_result[f"tf_{tf_name}"] = {"error": str(exc)}
+                last_error = None
+                for exchange in ("BINANCE", "BYBIT"):
+                    for tv_symbol in symbol_candidates:
+                        try:
+                            handler = TA_Handler(
+                                symbol=tv_symbol,
+                                screener="crypto",
+                                exchange=exchange,
+                                interval=interval,
+                                timeout=12,
+                            )
+                            analysis = handler.get_analysis()
+                            ta_result[f"tf_{tf_name}"] = {
+                                "recommendation": analysis.summary.get("RECOMMENDATION", "NEUTRAL"),
+                                "buy": analysis.summary.get("BUY", 0),
+                                "sell": analysis.summary.get("SELL", 0),
+                                "neutral": analysis.summary.get("NEUTRAL", 0),
+                                "oscillators": analysis.oscillators.get("RECOMMENDATION", "NEUTRAL"),
+                                "moving_averages": analysis.moving_averages.get("RECOMMENDATION", "NEUTRAL"),
+                                "rsi": _safe_rsi(analysis.oscillators.get("COMPUTE", {})),
+                                "exchange": exchange,
+                                "tv_symbol": tv_symbol,
+                            }
+                            break
+                        except Exception as exc:
+                            last_error = exc
+                    if f"tf_{tf_name}" in ta_result:
+                        break
+                else:
+                    logger.debug("[TV_FACTOR] %s %s: %s", symbol, tf_name, last_error)
+                    ta_result[f"tf_{tf_name}"] = {"error": str(last_error)}
             return ta_result
 
         loop = asyncio.get_running_loop()
