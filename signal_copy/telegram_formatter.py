@@ -407,7 +407,7 @@ def build_parser_report(
 
     # Section 3: Market data (only show fields with actual data)
     lines.append("📈 <b>DATA PASAR</b>")
-    lines.append(f"   Harga: {format_price(price)} | RSI: {rsi:.1f} | Regime: {regime}")
+    lines.append(f"   Harga: {format_price(price)} | RSI: {rsi if rsi is not None else 0.0:.1f} | Regime: {regime}")
     cvd_val = cvd if abs(cvd) > 0.001 else 0.0
     lines.append(f"   CVD z: {cvd_val:+.2f} {'🟢' if cvd_val >= 0 else '🔴'}")
     lines.append(f"   OI 5m/15m/1h: {_fmt_pct(oi_5m)}/{_fmt_pct(oi_15m)}/{_fmt_pct(oi_1h)}")
