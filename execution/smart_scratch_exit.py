@@ -470,6 +470,38 @@ def evaluate_scratch_exit_gate(
     reason = 'NOT_DUE'
     action = 'WAIT'
     should_exit = False
+
+    # Stale Zombie Guard:
+    # If a trade has been open beyond zombie timeout (12h for 15m/scalp, 24h for 1h/4h/1d)
+    # with zero TP hits, currently negative R, and never achieved strong momentum (MFE < 0.50R),
+    # it is dead capital that must be scratched to free up portfolio capacity.
+    tf = infer_timeframe(position)
+    tf_minutes = TF_MAP.get(tf, 15)
+    default_zombie_min = 1440.0 if tf_minutes >= 60 else 720.0
+    zombie_timeout = _safe_float(os.getenv('SCRATCH_ZOMBIE_TIMEOUT_MIN'), default_zombie_min)
+
+    is_zombie = (
+        hold_minutes >= zombie_timeout
+        and tp_count == 0
+        and excursion['current_r'] < 0.0
+        and excursion['max_favorable_r'] < 0.50
+    )
+    if is_zombie:
+        return {
+            'should_exit': True,
+            'should_partial_exit': False,
+            'action': 'EXIT',
+            'reason': 'STALE_ZOMBIE_TIMEOUT',
+            'effective_timeout_min': zombie_timeout,
+            'progress_threshold_r': progress_threshold,
+            'time_due': True,
+            'near_breakeven': near_breakeven,
+            'tp_hit_count': tp_count,
+            'tp1_progress': round(tp1_progress, 4),
+            'setup_context': setup,
+            'manual_structure_profile': manual_profile,
+            **excursion,
+        }
     if manual_profile['active']:
         max_hold_due = hold_minutes >= effective_timeout * manual_profile['max_hold_multiplier']
         current_r = excursion['current_r']
@@ -642,8 +674,16 @@ def evaluate_damage_reducer_gate(
             action = 'EXIT'
             should_exit = True
         elif time_due and mfe_giveback:
-            reason = 'MANUAL_DAMAGE_MFE_GIVEBACK_PROTECTED'
-            action = 'DEFER'
+            if current_r <= min_r or reversal_score >= manual_min_reversal:
+                reason = 'MANUAL_DAMAGE_MFE_GIVEBACK_EXIT'
+                action = 'EXIT'
+                should_exit = True
+            else:
+                reason = 'MANUAL_DAMAGE_MFE_GIVEBACK_PARTIAL'
+                action = 'PARTIAL_EXIT'
+                should_partial_exit = True
+                close_fraction = partial_fraction
+                stage_key = reason
         elif time_due and current_r <= min_r and reversal_score >= manual_min_reversal:
             reason = 'MANUAL_DAMAGE_REVERSAL_PARTIAL'
             action = 'PARTIAL_EXIT'

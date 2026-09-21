@@ -1674,7 +1674,10 @@ class BybitMainnetTrader:
                     )
         
         # LAYER 3: PROFIT_LOCK (move SL to BE+buffer)
-        # GATE: Only lock after TP1 hit to avoid premature locks from volatility spikes
+        # GATES:
+        # 1. Post-TP1 lock: Instantly lock once TP1 is hit.
+        # 2. Pre-TP1 early lock: Lock if trade achieved significant progress (MFE >= 0.65R or TP1 progress >= 70%)
+        #    and price is still safely positive (current_r >= 0.15R), preventing +0.70R to +0.80R givebacks.
         if self._config_bool("PROFIT_LOCK_ENABLED", default=True):
             if not pos.get("locked_profit", False):
                 lock_min = float(os.getenv("PROFIT_LOCK_MIN_MINUTES", "15"))
@@ -1683,8 +1686,31 @@ class BybitMainnetTrader:
                 # TP1-gated: only lock after at least one TP hit (confirmed profit)
                 tp_hit_count = len(pos.get("tp_hit", []))
                 
-                # Trigger instantly once at least one TP is confirmed
-                if tp_hit_count >= 1:
+                pre_tp1_enabled = self._config_bool("PROFIT_LOCK_PRE_TP1_ENABLED", default=True)
+                mfe_r = float(pos.get("scratch_max_favorable_r") or 0.0)
+                current_r = float(pos.get("scratch_current_r") or 0.0)
+                pre_tp1_min_mfe = float(os.getenv("PROFIT_LOCK_PRE_TP1_MIN_MFE_R", "0.65"))
+                pre_tp1_min_current_r = float(os.getenv("PROFIT_LOCK_PRE_TP1_MIN_CURRENT_R", "0.15"))
+                
+                tp1_progress = 0.0
+                tp_prices = pos.get("tp_prices") or []
+                if tp_prices and entry > 0:
+                    tp1_target = float(tp_prices[0])
+                    tp1_dist = abs(tp1_target - entry)
+                    if tp1_dist > 0:
+                        high_w = float(pos.get("scratch_high_watermark") or entry)
+                        low_w = float(pos.get("scratch_low_watermark") or entry)
+                        tp1_progress = (high_w - entry) / tp1_dist if side == "LONG" else (entry - low_w) / tp1_dist
+                
+                pre_tp1_triggered = (
+                    pre_tp1_enabled
+                    and tp_hit_count == 0
+                    and (mfe_r >= pre_tp1_min_mfe or tp1_progress >= 0.70)
+                    and current_r >= pre_tp1_min_current_r
+                    and hold_minutes >= lock_min
+                )
+
+                if tp_hit_count >= 1 or pre_tp1_triggered:
                     # Calculate new SL (breakeven + buffer)
                     sl = pos.get("sl_price", 0)
                     risk_distance = self._get_risk_distance(pos)
@@ -1715,12 +1741,13 @@ class BybitMainnetTrader:
                         # body ({}) on success, so do not treat {} as failure.
                         
                         pos["sl_price"] = new_sl
-                        pos["sl_kind"] = "BREAKEVEN"
+                        pos["sl_kind"] = "BREAKEVEN" if tp_hit_count >= 1 else "PRE_TP1_BREAKEVEN"
                         pos["locked_profit"] = True
                         self._save_positions()
                         
+                        trigger_desc = "TP1" if tp_hit_count >= 1 else f"PRE_TP1 (mfe={mfe_r:.2f}R, prog={tp1_progress:.0%})"
                         logger.info(
-                            f"[PROFIT_LOCK] {symbol} locked! SL moved {sl:.4f} → {new_sl:.4f}"
+                            f"[PROFIT_LOCK] {symbol} {side} locked via {trigger_desc}! SL moved {sl:.4f} → {new_sl:.4f}"
                         )
                     except Exception as e:
                         err_str = str(e)
@@ -1739,7 +1766,7 @@ class BybitMainnetTrader:
                                             f"[PROFIT_LOCK] {symbol} already locked (SL={current_sl:.4f}, target={new_sl:.4f})"
                                         )
                                         pos["sl_price"] = current_sl
-                                        pos["sl_kind"] = "BREAKEVEN"
+                                        pos["sl_kind"] = "BREAKEVEN" if tp_hit_count >= 1 else "PRE_TP1_BREAKEVEN"
                                         pos["locked_profit"] = True
                                         self._save_positions()
                                     else:
