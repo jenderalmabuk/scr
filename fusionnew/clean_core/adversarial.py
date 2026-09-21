@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Tuple
 
 # Per-call LLM timeout (was 15s; sequential bull+bear+judge could stall a cycle)
-LLM_TIMEOUT_SEC = float(os.getenv("ADV_LLM_TIMEOUT_SEC", "8"))
+LLM_TIMEOUT_SEC = float(os.getenv("ADV_LLM_TIMEOUT_SEC", "25"))
 
 # LLM config — use same provider as main config or env
 LLM_API_KEY = os.getenv("NINE_ROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("CUSTOM_API_KEY") or ""
