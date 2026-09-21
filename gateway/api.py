@@ -98,6 +98,10 @@ def build_router(gateway: ExecutionGateway) -> APIRouter:
         symbol = body.symbol.upper().replace("/", "")
         if body.action == "MOVE_SL" and body.price is not None:
             return await gateway.trader.update_stop(symbol, body.price)
+        if body.action == "UPDATE_TP" and body.price is not None:
+            if hasattr(gateway.trader, "update_tp"):
+                return await gateway.trader.update_tp(symbol, body.price)
+            return {"ok": False, "code": "UPDATE_TP_NOT_SUPPORTED"}
         if body.action == "CLOSE":
             close_reason = str(body.reason or "PROVIDER_CLOSE").upper()
             allowed_reasons = {

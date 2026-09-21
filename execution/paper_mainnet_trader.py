@@ -1792,6 +1792,27 @@ class PaperMainnetTrader:
             raise
         return {"ok": True, "code": "STOP_UPDATED", "old_sl": old, "new_sl": new_sl}
 
+    async def update_tp(self, symbol: str, new_tp: float, tp_index: int = 1) -> Dict[str, Any]:
+        pos = self.positions.get(symbol)
+        if not pos:
+            return {"ok": False, "code": "POSITION_NOT_FOUND"}
+        old_tps = list(pos.get("tp_prices") or [])
+        if not old_tps:
+            pos["tp_prices"] = [float(new_tp)]
+        else:
+            idx = max(0, tp_index - 1)
+            if idx < len(old_tps):
+                pos["tp_prices"][idx] = float(new_tp)
+            else:
+                pos["tp_prices"].append(float(new_tp))
+        try:
+            _persist_positions(self.positions)
+        except Exception:
+            pos["tp_prices"] = old_tps
+            raise
+        logger.info(f"[PAPER] {symbol} take profit updated: old={old_tps} -> new={pos['tp_prices']}")
+        return {"ok": True, "code": "TP_UPDATED", "old_tps": old_tps, "new_tps": pos['tp_prices']}
+
     async def close_position(self, symbol: str, reason: str = "PROVIDER_CLOSE") -> Dict[str, Any]:
         pos = self.positions.get(symbol)
         if not pos:

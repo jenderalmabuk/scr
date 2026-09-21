@@ -785,6 +785,43 @@ class BybitMainnetTrader:
                 logger.error(f"[BYBIT_MAINNET] {symbol} failed to update stop loss: {exc}")
                 return {"ok": False, "code": f"BYBIT_ERROR: {exc}"}
 
+    async def update_tp(self, symbol: str, new_tp: float, tp_index: int = 1) -> Dict[str, Any]:
+        """Update or set Take Profit level on Bybit position (called by gateway position_action)."""
+        async with self._position_lock:
+            pos = self.positions.get(symbol)
+            if not pos:
+                return {"ok": False, "code": "POSITION_NOT_FOUND"}
+
+            old_tps = list(pos.get("tp_prices") or [])
+            if not old_tps:
+                pos["tp_prices"] = [float(new_tp)]
+            else:
+                idx = max(0, tp_index - 1)
+                if idx < len(old_tps):
+                    pos["tp_prices"][idx] = float(new_tp)
+                else:
+                    pos["tp_prices"].append(float(new_tp))
+
+            # Sync with exchange if primary TP1
+            try:
+                instrument = await asyncio.to_thread(self.client.get_instrument_info, symbol)
+                tick_size = float(instrument["priceFilter"]["tickSize"])
+                quantized_tp = self._quantize(new_tp, tick_size)
+                if tp_index == 1:
+                    await asyncio.to_thread(
+                        self.client.set_trading_stop,
+                        symbol=symbol,
+                        position_idx=0,
+                        take_profit=quantized_tp,
+                    )
+            except Exception as exc:
+                logger.warning(f"[BYBIT_MAINNET] {symbol} bybit set_trading_stop take_profit warning: {exc}")
+
+            pos["tp_kind"] = "PROVIDER_UPDATE"
+            self._save_positions()
+            logger.info(f"[BYBIT_MAINNET] {symbol} TP updated to {new_tp} (was {old_tps})")
+            return {"ok": True, "code": "TP_UPDATED", "old_tps": old_tps, "new_tps": pos["tp_prices"]}
+
     async def close_position(self, symbol: str, reason: str = "PROVIDER_CLOSE") -> Dict[str, Any]:
         """Close full position on Bybit (called by gateway position_action)."""
         async with self._position_lock:

@@ -373,7 +373,7 @@ class SignalCopyOrchestrator:
             await self._notify_trades_channel(f"⚠️ PROVIDER UPDATE {update.symbol}: gateway unavailable")
             return True
         portfolio = await client.portfolio()
-        positions = [p for p in portfolio.get("open_positions", []) if p.get("symbol") == update.symbol]
+        positions = [p for p in portfolio.get("positions", portfolio.get("open_positions", [])) if p.get("symbol") == update.symbol]
         if len(positions) != 1:
             await self._notify_trades_channel(
                 f"⚠️ PROVIDER UPDATE {update.symbol}: no action, matching positions={len(positions)}")
@@ -382,6 +382,8 @@ class SignalCopyOrchestrator:
         if update.kind in (UpdateKind.MOVE_SL_BE, UpdateKind.MOVE_SL_PRICE):
             new_sl = float(pos["entry_price"] if update.kind == UpdateKind.MOVE_SL_BE else (update.price or 0.0))
             result = await client.position_action(update.symbol, "MOVE_SL", new_sl)
+        elif update.kind == UpdateKind.UPDATE_TP and update.price is not None:
+            result = await client.position_action(update.symbol, "UPDATE_TP", float(update.price))
         elif update.kind == UpdateKind.REMOVE_SL:
             result = await client.position_action(update.symbol, "MOVE_SL", 0.0)
             await self._notify_trades_channel(f"ℹ️ PROVIDER {update.symbol}: SL sementara dihilangkan atas instruksi provider")
