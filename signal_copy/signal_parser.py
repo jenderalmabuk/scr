@@ -245,11 +245,12 @@ def _extract_entry_block_prices(text: str) -> List[float]:
             if prices or stop_match:
                 break
             continue
+        segment = _strip_percent_values(segment)
         for nm in _NUMBER_RE.finditer(segment):
             v = _to_float(nm.group(1))
             if v is not None and v > 0:
                 prices.append(v)
-        if prices and (i > 0 or stop_match):
+        if len(prices) >= 2 or stop_match:
             break
     return prices
 
@@ -551,7 +552,7 @@ def parse_signal(
 
     # --- stop loss ---
     sl = None
-    m = re.search(r"(?:stop\s*loss|stoploss)\s*[:\-–—]*\s*\$?([\d.,]+)", text, re.IGNORECASE)
+    m = re.search(r"(?:stop\s*loss|stoploss)\s*[:\-–—]*\s*[^\d\s\n\w]*\s*\$?([\d.,]+)", text, re.IGNORECASE)
     if m:
         sl = _to_float(m.group(1))
     if sl is None:
