@@ -129,3 +129,64 @@ def test_market_fill_returns_confirmed_position(monkeypatch):
     assert result["qty"] > 0
     assert trader.client.orders[0]["order_type"] == "Market"
     assert trader.client.orders[0]["price"] is None
+
+
+def test_floor_rounding_safeguard_adjusts_qty_when_risk_exceeds_requested(monkeypatch):
+    async def fake_send_open_trade(payload):
+        return True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "notifications.telegram_notifier",
+        types.SimpleNamespace(send_open_trade=fake_send_open_trade),
+    )
+
+    trader = _trader(mark=100.0)
+    # Entry 100, SL 95 -> risk_distance = 5.0
+    # requested_notional = 100.0 -> initial qty = 100 / 100 = 1.0
+    # initial risk = 1.0 * 5.0 = 5.0
+    # requested_risk_amount = 4.0 (max allowed = 4.08)
+    # Without floor rounding: 5.0 > 4.08 -> would reject with RISK_EXCEEDS_REQUEST
+    # With floor rounding: target_qty = 4.0 / 5.0 = 0.8 -> accepted!
+    result = asyncio.run(trader.open_position(
+        symbol="BTCUSDT",
+        side="LONG",
+        entry_price=100.0,
+        sl_price=95.0,
+        tp_prices=[110.0],
+        requested_notional=100.0,
+        requested_risk_amount=4.0,
+    ))
+    assert result["ok"] is True
+    assert result["position_confirmed"] is True
+    assert float(trader.client.orders[0]["qty"]) == 0.8
+    assert result["actual_risk_amount"] == 4.0
+    assert result["notional"] == 80.0
+
+
+def test_floor_rounding_safeguard_rejects_when_min_notional_exceeds_risk(monkeypatch):
+    async def fake_send_open_trade(payload):
+        return True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "notifications.telegram_notifier",
+        types.SimpleNamespace(send_open_trade=fake_send_open_trade),
+    )
+
+    trader = _trader(mark=100.0)
+    # entry 100, SL 50 -> risk_distance = 50.0
+    # requested_risk = 0.50
+    # target_qty = 0.50 / 50.0 = 0.01 -> notional = $1.00 (< min_notional $5.00)
+    # Should reject with RISK_EXCEEDS_REQUEST because exchange minimum notional cannot be met within risk budget
+    result = asyncio.run(trader.open_position(
+        symbol="BTCUSDT",
+        side="LONG",
+        entry_price=100.0,
+        sl_price=50.0,
+        tp_prices=[150.0],
+        requested_notional=10.0,
+        requested_risk_amount=0.50,
+    ))
+    assert result["ok"] is False
+    assert result["code"] == "RISK_EXCEEDS_REQUEST"

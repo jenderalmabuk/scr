@@ -460,11 +460,42 @@ class BybitMainnetTrader:
                         "code": "INVALID_SIZE", "reason": "size calculation failed"}
             
             qty_float = float(qty_str)
-            actual_risk_amount = qty_float * abs(actual_entry - sl_price)
-            if requested_risk_amount > 0 and actual_risk_amount > requested_risk_amount * 1.02:
+            risk_distance = abs(actual_entry - sl_price)
+            actual_risk_amount = qty_float * risk_distance
+            max_allowed_risk = requested_risk_amount * 1.02 if requested_risk_amount > 0 else 0.0
+
+            # Floor-rounding risk safeguard:
+            # If rounded risk exceeds the requested risk budget (e.g. from lot-size quantization
+            # or slight entry slippage), floor quantity down by lot steps to strictly fit within
+            # the risk cap rather than aborting the trade.
+            if requested_risk_amount > 0 and actual_risk_amount > max_allowed_risk:
+                if risk_distance > 0 and lot_size > 0:
+                    target_qty = requested_risk_amount / risk_distance
+                    qty_floored = int(target_qty / lot_size) * lot_size
+                    lot_filter = instrument.get("lotSizeFilter") or {}
+                    min_order_qty = float(lot_filter.get("minOrderQty", lot_size) or lot_size)
+                    min_notional = float(lot_filter.get("minNotionalValue", 5.0) or 5.0)
+
+                    if qty_floored >= min_order_qty and qty_floored > 0:
+                        floored_qty_str = self._quantize(qty_floored, lot_size)
+                        floored_qty_float = float(floored_qty_str)
+                        floored_risk = floored_qty_float * risk_distance
+                        floored_notional = floored_qty_float * actual_entry
+                        if floored_risk <= max_allowed_risk and floored_notional >= min_notional and floored_qty_float > 0:
+                            logger.info(
+                                f"[BYBIT_MAINNET] {symbol} floor-rounded qty from {qty_str} to {floored_qty_str} "
+                                f"(notional ${notional:.2f} -> ${floored_notional:.2f}) "
+                                f"to keep risk ${floored_risk:.4f} <= requested ${requested_risk_amount:.4f}"
+                            )
+                            qty_str = floored_qty_str
+                            qty_float = floored_qty_float
+                            notional = floored_notional
+                            actual_risk_amount = floored_risk
+
+            if requested_risk_amount > 0 and actual_risk_amount > max_allowed_risk:
                 logger.warning(
                     f"[BYBIT_MAINNET] {symbol} rounded risk ${actual_risk_amount:.4f} "
-                    f"> requested ${requested_risk_amount:.4f}"
+                    f"> requested ${requested_risk_amount:.4f} even after floor rounding"
                 )
                 return {"ok": False, "executed": False, "position_confirmed": False,
                         "code": "RISK_EXCEEDS_REQUEST", "reason": "rounded risk exceeds requested risk"}
