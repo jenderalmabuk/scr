@@ -89,7 +89,7 @@ def normalize_manual_tp_ladder(
     side = str(side or "").upper()
     entry = _safe_float(entry)
     sl = _safe_float(sl)
-    risk = abs(entry - sl)
+    risk = abs(entry - sl) if sl > 0 and abs(entry - sl) > 0.000001 else 0.0
     raw = [_safe_float(tp) for tp in (tps or [])]
     if side == "LONG":
         clean = sorted({tp for tp in raw if tp > entry})

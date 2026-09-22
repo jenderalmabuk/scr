@@ -1305,6 +1305,13 @@ class BybitMainnetTrader:
                             pos["locked_profit"] = True
                             if str(pos.get("sl_kind") or "").upper() not in {"TRAILING", "BREAKEVEN"}:
                                 pos["sl_kind"] = "BREAKEVEN"
+                        else:
+                            # User set or adjusted a protective SL below entry (LONG) or above entry (SHORT)
+                            calc_rd = abs(entry - exchange_sl)
+                            curr_rd = float(pos.get("initial_risk_distance") or 0.0)
+                            if (curr_rd <= 0 or curr_rd >= entry * 0.95 or not pos.get("original_sl_price")) and calc_rd > 0:
+                                pos["original_sl_price"] = exchange_sl
+                                pos["initial_risk_distance"] = calc_rd
                         migrated = True
                     elif exchange_sl > 0 and entry > 0 and ((side == "LONG" and exchange_sl >= entry) or (side == "SHORT" and exchange_sl <= entry)) and not pos.get("locked_profit"):
                         pos["locked_profit"] = True
@@ -1324,12 +1331,17 @@ class BybitMainnetTrader:
                     )
                     # Import external position
                     side = "LONG" if ex_pos["side"] == "Buy" else "SHORT"
+                    entry_val = _ex_float(ex_pos.get("avgPrice"), 0.0)
+                    sl_val = _ex_float(ex_pos.get("stopLoss"), 0.0)
+                    init_rd = abs(entry_val - sl_val) if sl_val > 0 and abs(entry_val - sl_val) > 0.000001 else 0.0
                     imported_pos = {
                         "symbol": symbol,
                         "exchange": "bybit",
                         "side": side,
-                        "entry_price": _ex_float(ex_pos.get("avgPrice"), 0.0),
-                        "sl_price": _ex_float(ex_pos.get("stopLoss"), 0.0),
+                        "entry_price": entry_val,
+                        "sl_price": sl_val,
+                        "original_sl_price": sl_val if sl_val > 0 else None,
+                        "initial_risk_distance": init_rd,
                         "tp_prices": [_ex_float(ex_pos.get("takeProfit"), 0.0)] if _ex_float(ex_pos.get("takeProfit"), 0.0) > 0 else [],
                         "qty": ex_pos["size"],
                         "notional": _ex_float(ex_pos.get("positionValue"), 0.0),
@@ -1474,18 +1486,24 @@ class BybitMainnetTrader:
         Avoids collapsing to 0.0 when sl_price is moved to breakeven."""
         entry = float(pos.get("entry_price") or 0.0)
         initial_rd = float(pos.get("initial_risk_distance") or 0.0)
-        if initial_rd > 0:
+        if initial_rd > 0 and (entry <= 0 or initial_rd < entry * 0.95):
             return initial_rd
 
         orig_sl = float(pos.get("provider_sl_original") or pos.get("original_sl_price") or 0.0)
-        if orig_sl > 0 and abs(entry - orig_sl) > 0:
+        if orig_sl > 0 and abs(entry - orig_sl) > 0.000001:
             return abs(entry - orig_sl)
+
+        sl = float(pos.get("sl_price") or 0.0)
+        side = str(pos.get("side") or "").upper()
+        if sl > 0 and abs(entry - sl) > 0.000001:
+            if (side == "LONG" and sl < entry) or (side == "SHORT" and sl > entry):
+                return abs(entry - sl)
 
         meta = pos.get("metadata") or {}
         adv = meta.get("adv_snapshot") or {}
         tp_plan = adv.get("manual_tp_plan") or {}
         plan_rd = float(tp_plan.get("risk_distance") or 0.0)
-        if plan_rd > 0:
+        if 0 < plan_rd < entry * 0.90:
             return plan_rd
 
         tp_prices = pos.get("tp_prices") or []
@@ -1494,7 +1512,6 @@ class BybitMainnetTrader:
             if abs(tp1 - entry) > 0:
                 return abs(tp1 - entry)
 
-        sl = float(pos.get("sl_price") or 0.0)
         if sl > 0 and abs(entry - sl) > 0.000001:
             return abs(entry - sl)
 

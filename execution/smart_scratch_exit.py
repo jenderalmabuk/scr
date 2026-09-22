@@ -353,16 +353,25 @@ def update_scratch_excursion(position: Dict[str, Any], mark: float) -> Dict[str,
     mark = _safe_float(mark)
     side = str(position.get('side') or '').upper()
     initial_rd = _safe_float(position.get('initial_risk_distance'))
-    if initial_rd > 0:
+    if initial_rd > 0 and (entry <= 0 or initial_rd < entry * 0.95):
         risk_distance = initial_rd
     else:
+        # Check original / protective SL
         sl = _safe_float(position.get('provider_sl_original') or position.get('original_sl_price'))
+        if sl <= 0 or abs(entry - sl) <= 0.000001:
+            # Check current sl_price directly
+            pos_sl = _safe_float(position.get('sl_price'))
+            if pos_sl > 0 and abs(entry - pos_sl) > 0.000001:
+                # Valid protective stop
+                if (side == 'LONG' and pos_sl < entry) or (side == 'SHORT' and pos_sl > entry):
+                    sl = pos_sl
         if sl <= 0 or abs(entry - sl) <= 0.000001:
             meta = position.get('metadata') or {}
             adv = meta.get('adv_snapshot') or {}
             tp_plan = adv.get('manual_tp_plan') or {}
             plan_rd = _safe_float(tp_plan.get('risk_distance'))
-            if plan_rd > 0:
+            # ONLY use plan_rd if it is not 0 and not equal to entry (the 100% price bug)
+            if 0 < plan_rd < entry * 0.90:
                 sl = entry - plan_rd if side == 'LONG' else entry + plan_rd
             else:
                 tp_prices = position.get('tp_prices') or []
@@ -373,6 +382,10 @@ def update_scratch_excursion(position: Dict[str, Any], mark: float) -> Dict[str,
                 if sl <= 0 or abs(entry - sl) <= 0.000001:
                     sl = _safe_float(position.get('sl_price'))
         risk_distance = abs(entry - sl) if entry > 0 and sl > 0 and abs(entry - sl) > 0.000001 else entry * 0.01
+        if risk_distance > entry * 0.01:
+            position['initial_risk_distance'] = risk_distance
+            if sl > 0 and not position.get('original_sl_price'):
+                position['original_sl_price'] = sl
 
     if entry <= 0 or mark <= 0 or risk_distance <= 0:
         snapshot = {
