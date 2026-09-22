@@ -374,9 +374,12 @@ class SignalCopyOrchestrator:
             return True
         portfolio = await client.portfolio()
         positions = [p for p in portfolio.get("positions", portfolio.get("open_positions", [])) if p.get("symbol") == update.symbol]
-        if len(positions) != 1:
+        if len(positions) == 0:
+            logger.info(f"[PROVIDER_UPDATE] {update.symbol}: no matching open position on gateway, skipping")
+            return True
+        if len(positions) > 1:
             await self._notify_trades_channel(
-                f"⚠️ PROVIDER UPDATE {update.symbol}: no action, matching positions={len(positions)}")
+                f"⚠️ PROVIDER UPDATE {update.symbol}: ambiguous, multiple positions={len(positions)}")
             return True
         pos = positions[0]
         if update.kind in (UpdateKind.MOVE_SL_BE, UpdateKind.MOVE_SL_PRICE):

@@ -1,7 +1,9 @@
-"""Bilingual (Indonesian + English) provider-update parser for real-time trade adjustments."""
+"""Bilingual (Indonesian + English) provider-update parser, pilot channel only."""
 from dataclasses import dataclass
 from enum import Enum
 import re
+
+PILOT_CHANNEL = -1001652601224
 
 
 class UpdateKind(str, Enum):
@@ -38,29 +40,41 @@ def _symbol(text: str, fallback: str | None = None) -> str:
         "CRYPTO", "FULL", "PARTIAL", "POSITION", "TRADE", "ENTRY", "TARGET",
         "PROFIT", "SETUP", "DETAIL", "DETAILS", "ALL", "HERE", "IS", "IT",
         "HILANGKAN", "HAPUS", "SEMENTARA", "GESER", "PINDAHKAN", "TUTUP",
-        "SEKARANG", "PASANG", "BATAL", "BATALKAN", "NEW", "ONE",
+        "SEKARANG", "PASANG", "BATAL", "BATALKAN", "NEW", "ONE", "VIP", "FREE",
+        "JOIN", "RESULTS", "RESULT", "LIVE", "OPENING", "SMALL", "FEW", "MINUTES",
     }
-    # Direct symbol with or without slash: #BTCUSDT, BTC/USDT, $BTC, BTCUSDT
-    m = re.search(r"(?:#|\$|\b)([A-Z0-9]{2,12})(?:/USDT|USDT)\b", text.upper())
-    if m and m.group(1) not in ignored:
-        base = m.group(1)
+    # 1. Matches with # or $: e.g. #BTC, #1000PEPE, $SOL
+    m_tag = re.search(r"(?:#|\$)([A-Z0-9]{2,12})(?:/USDT|USDT)?\b", text.upper())
+    if m_tag and m_tag.group(1) not in ignored:
+        base = m_tag.group(1)
         return base if base.endswith("USDT") else base + "USDT"
 
-    for base in re.findall(r"(?:#| )([A-Z0-9]{2,12})(?:/USDT|USDT)? ", text.upper()):
-        if base not in ignored:
-            return base if base.endswith("USDT") else base + "USDT"
+    # 2. Matches explicit USDT pair: e.g. BTC/USDT, 1000PEPEUSDT
+    m_usdt = re.search(r"\b([A-Z0-9]{2,12})(?:/USDT|USDT)\b", text.upper())
+    if m_usdt and m_usdt.group(1) not in ignored:
+        base = m_usdt.group(1)
+        return base if base.endswith("USDT") else base + "USDT"
+
+    # 3. Matches symbol at start of line or after command: e.g. "1000pepe new tp", "Close alch"
+    m_start = re.search(r"^(?:(?:CLOSE|TUTUP)\s+)?([A-Z0-9]{2,12})\b", text.upper().strip())
+    if m_start and m_start.group(1) not in ignored:
+        base = m_start.group(1)
+        return base if base.endswith("USDT") else base + "USDT"
+
     return ""
 
 
 def parse_provider_update(text: str, channel_id: int | None = None, reply_symbol: str | None = None) -> ProviderUpdate | None:
+    if channel_id is not None and channel_id != PILOT_CHANNEL:
+        return None
     normalized = " ".join((text or "").split())
     upper = normalized.upper()
     symbol = _symbol(upper, reply_symbol)
     if not symbol:
         return None
 
-    # 1. Remove / Suspend SL temporarily ("hilangkan sl", "remove sl", "take off sl", "hapus sl")
-    if re.search(r"(?:HILANGKAN|REMOVE|CANCEL|DELETE|TAKE\s*OFF|HAPUS)\s+(?:THE\s+)?SL|SL\s+(?:DIHILANGKAN|REMOVED|CANCELLED|SEMENTARA|OFF|DIHAPUS)", upper):
+    # 1. Remove / Suspend SL temporarily ("hilangkan sl", "remove sl", "renmove sl", "take off sl", "hapus sl")
+    if re.search(r"(?:HILANGKAN|REMOVE|RENMOVE|CANCEL|DELETE|TAKE\s*OFF|HAPUS)\s+(?:THE\s+)?SL|SL\s+(?:DIHILANGKAN|REMOVED|CANCELLED|SEMENTARA|OFF|DIHAPUS)", upper):
         return ProviderUpdate(UpdateKind.REMOVE_SL, symbol)
 
     # 2. Move SL to BE ("move sl to be", "sl be", "geser sl ke be", "bep", "sl to entry")
@@ -68,7 +82,7 @@ def parse_provider_update(text: str, channel_id: int | None = None, reply_symbol
         return ProviderUpdate(UpdateKind.MOVE_SL_BE, symbol)
 
     # 3. Move SL to explicit price ("SL: 0.045", "sl move to 0.045", "geser sl ke 0.045", "move sl to 0.045")
-    m = re.search(r"(?:(?:MOVE|MOVED|SET|GESER|PINDAHKAN|NEW)\s+)?SL\s*(?:MOVE|MOVED|SET|GESER|PINDAHKAN)?\s*(?:TO|AT|KE|:)?\s*[:@]?\s*([0-9]+(?:\.[0-9]+)?)", upper)
+    m = re.search(r"(?:(?:MOVE|MOVED|SET|GESER|PINDAHKAN|NEW)\s+)?SL\s*(?:MOVE|MOVED|SET|GESER|PINDAHKAN)?\s*(?:TO|AT|KE|:)?\s*[:@]??\s*([0-9]+(?:\.[0-9]+)?)", upper)
     if m:
         return ProviderUpdate(UpdateKind.MOVE_SL_PRICE, symbol, float(m.group(1)))
 
@@ -76,8 +90,8 @@ def parse_provider_update(text: str, channel_id: int | None = None, reply_symbol
     if re.search(r"\b(?:CANCEL(?:LED)?|BATAL(?:KAN)?)\b", upper):
         return ProviderUpdate(UpdateKind.CANCEL, symbol)
 
-    # 5. Close position ("close", "close now", "tutup sekarang", "exit now")
-    if re.search(r"\b(?:CLOSE|TUTUP|EXIT|OUT)\b\s*(?:NOW|SEKARANG)?", upper):
+    # 5. Close position ("close", "close now", "close alch", "tutup sekarang", "exit now")
+    if re.search(r"\b(?:CLOSE|TUTUP|EXIT|OUT)\b", upper):
         return ProviderUpdate(UpdateKind.CLOSE, symbol)
 
     # 6. TP Hit
@@ -85,11 +99,12 @@ def parse_provider_update(text: str, channel_id: int | None = None, reply_symbol
     if m:
         return ProviderUpdate(UpdateKind.TP_HIT, symbol, tp_index=int(m.group(1)))
 
-    # 7. Update TP ("one new tp 1 0.004450", "new tp 1: 0.00445", "update tp 1: 0.00445", "new tp: 0.00445")
-    m = re.search(r"(?:NEW\s+TP|UPDATE\s+TP|ADJUST\s+TP|SET\s+TP|TP)\s*([1-9])?\s*(?:TO|AT|:)?\s*[:@]?\s*([0-9]+(?:\.[0-9]+)?)", upper)
+    # 7. Update TP ("1000pepe new tp 1 0.005100", "Kernel 2nd tp 0.06400", "Kernel tp 3 0.07000", "new tp: 0.00445")
+    m = re.search(r"(?:(?:NEW|UPDATE|ADJUST|SET)\s+)?(?:([1-9])(?:ND|RD|TH|ST)?\s+TP|TP\s*([1-9])?)\s*(?:TO|AT|:)?\s*[:@]??\s*([0-9]+(?:\.[0-9]+)?)", upper)
     if m:
-        tp_idx = int(m.group(1)) if m.group(1) else 1
-        price = float(m.group(2))
+        idx_str = m.group(1) or m.group(2)
+        tp_idx = int(idx_str) if idx_str else 1
+        price = float(m.group(3))
         return ProviderUpdate(UpdateKind.UPDATE_TP, symbol, price=price, tp_index=tp_idx)
 
     return None

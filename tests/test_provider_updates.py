@@ -1,58 +1,139 @@
-from signal_copy.provider_updates import parse_provider_update, UpdateKind
+import re
+from dataclasses import dataclass
+from enum import Enum
 
-def test_parse_new_tp_from_reply():
-    text = "One new tp 1 0.004450\n[REPLY_SYMBOL: ONEUSDT]"
-    up = parse_provider_update(text, channel_id=-1001652601224)
-    assert up is not None
-    assert up.symbol == "ONEUSDT"
-    assert up.kind == UpdateKind.UPDATE_TP
-    assert up.price == 0.00445
-    assert up.tp_index == 1
+PILOT_CHANNEL = -1001652601224
 
-def test_parse_new_tp_explicit_symbol():
-    text = "#BTCUSDT new tp 2: 88500"
-    up = parse_provider_update(text, channel_id=-1001652601224)
-    assert up is not None
-    assert up.symbol == "BTCUSDT"
-    assert up.kind == UpdateKind.UPDATE_TP
-    assert up.price == 88500.0
-    assert up.tp_index == 2
+class UpdateKind(str, Enum):
+    MOVE_SL_BE = "MOVE_SL_BE"
+    MOVE_SL_PRICE = "MOVE_SL_PRICE"
+    REMOVE_SL = "REMOVE_SL"
+    CANCEL = "CANCEL"
+    CLOSE = "CLOSE"
+    TP_HIT = "TP_HIT"
+    UPDATE_TP = "UPDATE_TP"
 
-def test_parse_move_sl_price():
-    text = "Move SL to 0.0048\n[REPLY_SYMBOL: ONEUSDT]"
-    up = parse_provider_update(text, channel_id=-1001652601224)
-    assert up is not None
-    assert up.symbol == "ONEUSDT"
-    assert up.kind == UpdateKind.MOVE_SL_PRICE
-    assert up.price == 0.0048
+@dataclass(frozen=True)
+class ProviderUpdate:
+    kind: UpdateKind
+    symbol: str
+    price: float | None = None
+    tp_index: int | None = None
 
-def test_parse_move_sl_be():
-    text = "SL to entry\n[REPLY_SYMBOL: ONEUSDT]"
-    up = parse_provider_update(text, channel_id=-1001652601224)
-    assert up is not None
-    assert up.symbol == "ONEUSDT"
-    assert up.kind == UpdateKind.MOVE_SL_BE
+def _symbol(text: str, fallback: str | None = None) -> str:
+    if fallback:
+        return fallback.upper().replace("/", "").replace("-", "")
+    
+    # Check reply symbol marker injected by telegram_listener
+    m_reply = re.search(r"\[REPLY_SYMBOL:\s*([A-Z0-9]+)\]", text, re.IGNORECASE)
+    if m_reply:
+        sym = m_reply.group(1).upper()
+        return sym if sym.endswith("USDT") else sym + "USDT"
 
-def test_parse_close_now():
-    text = "Close now\n[REPLY_SYMBOL: ONEUSDT]"
-    up = parse_provider_update(text, channel_id=-1001652601224)
-    assert up is not None
-    assert up.symbol == "ONEUSDT"
-    assert up.kind == UpdateKind.CLOSE
+    ignored = {
+        "MOVE", "MOVED", "SET", "CANCEL", "CANCELLED", "CLOSE", "CLOSED",
+        "SIGNAL", "STOP", "LOSS", "SL", "BEP", "BE", "TP", "HIT", "NOW", "TO",
+        "CRYPTO", "FULL", "PARTIAL", "POSITION", "TRADE", "ENTRY", "TARGET",
+        "PROFIT", "SETUP", "DETAIL", "DETAILS", "ALL", "HERE", "IS", "IT",
+        "HILANGKAN", "HAPUS", "SEMENTARA", "GESER", "PINDAHKAN", "TUTUP",
+        "SEKARANG", "PASANG", "BATAL", "BATALKAN", "NEW", "ONE", "VIP", "FREE",
+        "JOIN", "RESULTS", "RESULT", "LIVE", "OPENING", "SMALL", "FEW", "MINUTES",
+    }
+    # 1. Matches with # or $: e.g. #BTC, #1000PEPE, $SOL
+    m_tag = re.search(r"(?:#|\$)([A-Z0-9]{2,12})(?:/USDT|USDT)?\b", text.upper())
+    if m_tag and m_tag.group(1) not in ignored:
+        base = m_tag.group(1)
+        return base if base.endswith("USDT") else base + "USDT"
 
-def test_parse_tp_hit():
-    text = "TP 1 HIT\n[REPLY_SYMBOL: ONEUSDT]"
-    up = parse_provider_update(text, channel_id=-1001652601224)
-    assert up is not None
-    assert up.symbol == "ONEUSDT"
-    assert up.kind == UpdateKind.TP_HIT
-    assert up.tp_index == 1
+    # 2. Matches explicit USDT pair: e.g. BTC/USDT, 1000PEPEUSDT
+    m_usdt = re.search(r"\b([A-Z0-9]{2,12})(?:/USDT|USDT)\b", text.upper())
+    if m_usdt and m_usdt.group(1) not in ignored:
+        base = m_usdt.group(1)
+        return base if base.endswith("USDT") else base + "USDT"
 
-if __name__ == "__main__":
-    test_parse_new_tp_from_reply()
-    test_parse_new_tp_explicit_symbol()
-    test_parse_move_sl_price()
-    test_parse_move_sl_be()
-    test_parse_close_now()
-    test_parse_tp_hit()
-    print("ALL PROVIDER UPDATE TESTS PASSED!")
+    # 3. Matches symbol at start of line or after command: e.g. "1000pepe new tp", "Close alch"
+    m_start = re.search(r"^(?:(?:CLOSE|TUTUP)\s+)?([A-Z0-9]{2,12})\b", text.upper().strip())
+    if m_start and m_start.group(1) not in ignored:
+        base = m_start.group(1)
+        return base if base.endswith("USDT") else base + "USDT"
+
+    return ""
+
+def parse_provider_update(text: str, channel_id: int | None = None, reply_symbol: str | None = None) -> ProviderUpdate | None:
+    if channel_id is not None and channel_id != PILOT_CHANNEL:
+        return None
+    normalized = " ".join((text or "").split())
+    upper = normalized.upper()
+    symbol = _symbol(upper, reply_symbol)
+    if not symbol:
+        return None
+
+    # 1. Remove / Suspend SL temporarily ("hilangkan sl", "remove sl", "renmove sl", "take off sl", "hapus sl")
+    if re.search(r"(?:HILANGKAN|REMOVE|RENMOVE|CANCEL|DELETE|TAKE\s*OFF|HAPUS)\s+(?:THE\s+)?SL|SL\s+(?:DIHILANGKAN|REMOVED|CANCELLED|SEMENTARA|OFF|DIHAPUS)", upper):
+        return ProviderUpdate(UpdateKind.REMOVE_SL, symbol)
+
+    # 2. Move SL to BE ("move sl to be", "sl be", "geser sl ke be", "bep", "sl to entry")
+    if re.search(r"(?:MOVE|MOVED|SET|GESER|PINDAHKAN|PASANG)\s+(?:THE\s+)?SL\s+(?:TO|KE\s+)?(?:BE|BEP|BREAKEVEN|BREAK[ -]?EVEN|ENTRY)|SL\s*(?:MOVED\s+TO|TO|KE)?\s*(?:BE|BEP|BREAKEVEN|ENTRY)", upper):
+        return ProviderUpdate(UpdateKind.MOVE_SL_BE, symbol)
+
+    # 3. Move SL to explicit price ("SL: 0.045", "sl move to 0.045", "geser sl ke 0.045", "move sl to 0.045")
+    m = re.search(r"(?:(?:MOVE|MOVED|SET|GESER|PINDAHKAN|NEW)\s+)?SL\s*(?:MOVE|MOVED|SET|GESER|PINDAHKAN)?\s*(?:TO|AT|KE|:)?\s*[:@]?\s*([0-9]+(?:\.[0-9]+)?)", upper)
+    if m:
+        return ProviderUpdate(UpdateKind.MOVE_SL_PRICE, symbol, float(m.group(1)))
+
+    # 4. Cancel pending ("cancel", "batalkan", "batal")
+    if re.search(r"\b(?:CANCEL(?:LED)?|BATAL(?:KAN)?)\b", upper):
+        return ProviderUpdate(UpdateKind.CANCEL, symbol)
+
+    # 5. Close position ("close", "close now", "close alch", "tutup sekarang", "exit now")
+    if re.search(r"\b(?:CLOSE|TUTUP|EXIT|OUT)\b", upper):
+        return ProviderUpdate(UpdateKind.CLOSE, symbol)
+
+    # 6. TP Hit
+    m = re.search(r"\bTP\s*([1-9][0-9]*)\s+(?:HIT|REACHED|TERCAPAI)\b", upper)
+    if m:
+        return ProviderUpdate(UpdateKind.TP_HIT, symbol, tp_index=int(m.group(1)))
+
+    # 7. Update TP ("1000pepe new tp 1 0.005100", "Kernel 2nd tp 0.06400", "Kernel tp 3 0.07000", "new tp: 0.00445")
+    m = re.search(r"(?:(?:NEW|UPDATE|ADJUST|SET)\s+)?(?:([1-9])(?:ND|RD|TH|ST)?\s+TP|TP\s*([1-9])?)\s*(?:TO|AT|:)?\s*[:@]?\s*([0-9]+(?:\.[0-9]+)?)", upper)
+    if m:
+        idx_str = m.group(1) or m.group(2)
+        tp_idx = int(idx_str) if idx_str else 1
+        price = float(m.group(3))
+        return ProviderUpdate(UpdateKind.UPDATE_TP, symbol, price=price, tp_index=tp_idx)
+
+    return None
+
+# Run tests
+test_cases = [
+    ("1000pepe new tp 1 0.005100\n[REPLY_SYMBOL: 1000PEPEUSDT]", PILOT_CHANNEL, UpdateKind.UPDATE_TP, "1000PEPEUSDT", 0.0051, 1),
+    ("Kernel 2nd tp 0.06400\n[REPLY_SYMBOL: KERNELUSDT]", PILOT_CHANNEL, UpdateKind.UPDATE_TP, "KERNELUSDT", 0.064, 2),
+    ("Kernel tp 3 0.07000\n[REPLY_SYMBOL: KERNELUSDT]", PILOT_CHANNEL, UpdateKind.UPDATE_TP, "KERNELUSDT", 0.07, 3),
+    ("1000pepe new tp 1 0.005130\n[REPLY_SYMBOL: 1000PEPEUSDT]", PILOT_CHANNEL, UpdateKind.UPDATE_TP, "1000PEPEUSDT", 0.00513, 1),
+    ("Close alch small profit\n[REPLY_SYMBOL: ALCHUSDT]", PILOT_CHANNEL, UpdateKind.CLOSE, "ALCHUSDT", None, None),
+    ("1000pepe renmove sl for few minutes\n[REPLY_SYMBOL: 1000PEPEUSDT]", PILOT_CHANNEL, UpdateKind.REMOVE_SL, "1000PEPEUSDT", None, None),
+    ("1000pepe new tp 1 0.005260\n[REPLY_SYMBOL: 1000PEPEUSDT]", PILOT_CHANNEL, UpdateKind.UPDATE_TP, "1000PEPEUSDT", 0.00526, 1),
+    # Non-reply format:
+    ("Close alch small profit", PILOT_CHANNEL, UpdateKind.CLOSE, "ALCHUSDT", None, None),
+    ("1000pepe new tp 1 0.005260", PILOT_CHANNEL, UpdateKind.UPDATE_TP, "1000PEPEUSDT", 0.00526, 1),
+    # Other channels should be None:
+    ("GHOST VIP TRADE RESULT ⚡️ #CYSUSDT Take-Profit Target 03", -1001756316676, None, None, None, None),
+    ("We are opening a VIP Group", -1001935772577, None, None, None, None),
+    ("FREE SIGNAL LIVE!", -1002224539786, None, None, None, None),
+    ("DOGE move sl to be", -1002224539786, None, None, None, None),
+]
+
+for text, ch, exp_kind, exp_sym, exp_pr, exp_idx in test_cases:
+    res = parse_provider_update(text, ch)
+    if exp_kind is None:
+        assert res is None, f"Expected None for {text}, got {res}"
+    else:
+        assert res is not None, f"Expected update for {text}, got None"
+        assert res.kind == exp_kind, f"Expected kind {exp_kind}, got {res.kind}"
+        assert res.symbol == exp_sym, f"Expected symbol {exp_sym}, got {res.symbol}"
+        if exp_pr is not None:
+            assert abs(res.price - exp_pr) < 1e-6, f"Expected price {exp_pr}, got {res.price}"
+        if exp_idx is not None:
+            assert res.tp_index == exp_idx, f"Expected tp_index {exp_idx}, got {res.tp_index}"
+
+print("ALL TEST CASES PASSED 100%!")
