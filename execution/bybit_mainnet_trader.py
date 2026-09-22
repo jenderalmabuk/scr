@@ -1312,6 +1312,21 @@ class BybitMainnetTrader:
                             if (curr_rd <= 0 or curr_rd >= entry * 0.95 or not pos.get("original_sl_price")) and calc_rd > 0:
                                 pos["original_sl_price"] = exchange_sl
                                 pos["initial_risk_distance"] = calc_rd
+                                # Re-normalize manual TP ladder with the actual SL so TP1 is set at 1.0R
+                                if pos.get("metadata", {}).get("imported") is True:
+                                    try:
+                                        from execution.manual_signal_tools import normalize_manual_tp_ladder
+                                        ex_tp = _ex_float(ex_pos.get("takeProfit"), 0.0)
+                                        ladder, tp_plan = normalize_manual_tp_ladder(side, entry, exchange_sl, [ex_tp] if ex_tp > 0 else [])
+                                        if ladder:
+                                            pos["tp_prices"] = ladder
+                                            pos.setdefault("metadata", {})["signal_tp_ladder"] = list(ladder)
+                                            if "adv_snapshot" in pos.get("metadata", {}):
+                                                pos["metadata"]["adv_snapshot"]["manual_tp_plan"] = tp_plan
+                                                pos["metadata"]["adv_snapshot"]["signal_tp_ladder"] = list(ladder)
+                                            logger.info(f"[BYBIT_MAINNET] {symbol} re-normalized manual TP ladder with new SL {exchange_sl}: {ladder}")
+                                    except Exception as tp_err:
+                                        logger.warning(f"[BYBIT_MAINNET] {symbol} failed to re-normalize TP ladder: {tp_err}")
                         migrated = True
                     elif exchange_sl > 0 and entry > 0 and ((side == "LONG" and exchange_sl >= entry) or (side == "SHORT" and exchange_sl <= entry)) and not pos.get("locked_profit"):
                         pos["locked_profit"] = True
