@@ -67,11 +67,40 @@ def _i(value: Any, default: int = 0) -> int:
 def _nearest_pullback_entry(sig, price: float) -> float | None:
     low = float(getattr(sig, "entry_low", 0.0) or 0.0)
     high = float(getattr(sig, "entry_high", 0.0) or 0.0)
-    if low <= 0 or high <= 0 or abs(high - low) <= max(high, low) * 1e-7:
+    
+    # 1. Explicit range entry provided by provider (e.g. 100 - 105)
+    if low > 0 and high > 0 and abs(high - low) > max(high, low) * 1e-7:
+        if low <= price <= high:
+            return low if sig.is_long else high
+        return low if price < low else high
+
+    # 2. Single entry point provided (or range collapsed to single price)
+    base_entry = low if low > 0 else (high if high > 0 else float(getattr(sig, "entry_mid", 0.0) or 0.0))
+    if base_entry <= 0:
         return None
-    if low <= price <= high:
-        return low if sig.is_long else high
-    return low if price < low else high
+
+    sl = float(getattr(sig, "stop_loss", 0.0) or 0.0)
+    risk = abs(base_entry - sl) if sl > 0 else base_entry * 0.015
+
+    pullback_r = _f(getattr(vc, "SMART_PULLBACK_R_FRACTION", 0.15), 0.15)
+    pullback_dist = risk * pullback_r
+
+    if sig.is_long:
+        if price > base_entry:
+            return base_entry
+        else:
+            target = min(price, base_entry) - pullback_dist
+            if sl > 0 and target <= sl + (risk * 0.30):
+                target = sl + (risk * 0.30)
+            return target if target > 0 else None
+    else:
+        if price < base_entry:
+            return base_entry
+        else:
+            target = max(price, base_entry) + pullback_dist
+            if sl > 0 and target >= sl - (risk * 0.30):
+                target = sl - (risk * 0.30)
+            return target if target > 0 else None
 
 
 def _profit_drift_r(sig, price: float) -> float:
@@ -217,6 +246,16 @@ def route_entry(
         if score and score < vc.AUTO_MARKET_MIN_SCORE:
             conflicts.append("AUTO_SCORE_MARKET_TO_LIMIT")
         if conflicts:
+            has_thesis_veto = any("ADVERSARIAL_NO" in c or "COMMITTEE_NO" in c for c in conflicts)
+            if has_thesis_veto:
+                return EntryDecision(
+                    EntryAction.WAIT_CONFIRMATION,
+                    price,
+                    conflicts[0],
+                    passed,
+                    _rr_ladder(sig, price),
+                    conflicts,
+                )
             pullback = _nearest_pullback_entry(sig, price)
             if pullback is None:
                 return EntryDecision(
