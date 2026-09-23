@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 
 from execution.bybit_api_client import BybitClient, BybitAPIError
 from execution.smart_scratch_exit import calculate_smart_scratch_timeout, evaluate_damage_reducer_gate, evaluate_scratch_exit_gate, update_scratch_excursion
@@ -1532,16 +1532,38 @@ class BybitMainnetTrader:
 
         return abs(entry * 0.01) if entry > 0 else 1.0
 
-    async def _get_recent_swing_level(self, symbol: str, side: str, limit: int = 12) -> Optional[float]:
+    @staticmethod
+    def _calc_atr_from_klines(klines: list, period: int = 14) -> float:
+        """Calculate True Range and 14-period ATR from klines."""
+        if not klines or len(klines) < 2:
+            return 0.0
+        sorted_kl = sorted(klines, key=lambda x: int(x[0]))
+        trs = []
+        for i in range(1, len(sorted_kl)):
+            try:
+                prev_c = float(sorted_kl[i-1][4])
+                curr_h = float(sorted_kl[i][2])
+                curr_l = float(sorted_kl[i][3])
+                tr = max(curr_h - curr_l, abs(curr_h - prev_c), abs(curr_l - prev_c))
+                trs.append(tr)
+            except (IndexError, ValueError, TypeError):
+                continue
+        if not trs:
+            return 0.0
+        sample = trs[-period:] if len(trs) >= period else trs
+        return sum(sample) / len(sample)
+
+    async def _get_recent_swing_level(self, symbol: str, side: str, limit: int = 20) -> Tuple[Optional[float], float]:
         """
-        Identify recent structural swing level from 15m closed candles.
+        Identify recent structural swing level from 15m closed candles with dynamic ATR breathing room.
         
         For LONG: finds the lowest low among recent closed 15m candles and applies
-        a -0.3% anti-hunt buffer.
+        an ATR-based anti-hunt breathing buffer (default: max(0.75 * ATR, 1.0%)).
         For SHORT: finds the highest high among recent closed 15m candles and applies
-        a +0.3% anti-hunt buffer.
+        an ATR-based anti-hunt breathing buffer.
         
-        Caches kline results for 30s to avoid redundant API load.
+        Returns:
+            Tuple[Optional[float], float]: (swing_level, atr_15m)
         """
         now = time.time()
         cached = self._kline_cache.get(symbol)
@@ -1562,33 +1584,41 @@ class BybitMainnetTrader:
                 if cached:
                     klines = cached.get("klines", [])
                 else:
-                    return None
+                    return None, 0.0
         
         if not klines or len(klines) < 2:
-            return None
+            return None, 0.0
         
         # klines[0] is current open candle; klines[1:] are closed candles
         closed_klines = klines[1:min(len(klines), limit)]
         if not closed_klines:
-            return None
+            return None, 0.0
+        
+        atr_15m = self._calc_atr_from_klines(closed_klines, period=14)
         
         try:
-            buffer_pct = float(os.getenv("HYBRID_TRAIL_SWING_BUFFER_PCT", "0.3")) / 100.0
+            atr_mult = float(os.getenv("HYBRID_TRAIL_ATR_MULT", "0.75"))
+            min_buffer_pct = float(os.getenv("HYBRID_TRAIL_MIN_BUFFER_PCT", "1.0")) / 100.0
+            
             if side == "LONG":
                 window_lows = [float(k[3]) for k in closed_klines[:8] if len(k) > 3]
                 if not window_lows:
-                    return None
+                    return None, atr_15m
                 recent_swing_low = min(window_lows)
-                return recent_swing_low * (1.0 - buffer_pct)
+                atr_buffer = atr_15m * atr_mult if atr_15m > 0 else recent_swing_low * min_buffer_pct
+                effective_buffer = max(atr_buffer, recent_swing_low * min_buffer_pct)
+                return recent_swing_low - effective_buffer, atr_15m
             else:
                 window_highs = [float(k[2]) for k in closed_klines[:8] if len(k) > 2]
                 if not window_highs:
-                    return None
+                    return None, atr_15m
                 recent_swing_high = max(window_highs)
-                return recent_swing_high * (1.0 + buffer_pct)
+                atr_buffer = atr_15m * atr_mult if atr_15m > 0 else recent_swing_high * min_buffer_pct
+                effective_buffer = max(atr_buffer, recent_swing_high * min_buffer_pct)
+                return recent_swing_high + effective_buffer, atr_15m
         except Exception as e:
             logger.warning(f"[HYBRID_TRAIL] Error parsing klines for {symbol}: {e}")
-            return None
+            return None, atr_15m
 
     async def _apply_dynamic_exits(self, symbol: str, pos: Dict, mark: float) -> bool:
         """
@@ -1923,20 +1953,26 @@ class BybitMainnetTrader:
             elif tp_hit_count >= 1 or locked or profit_r >= 1.5:
                 step_floor = min(step_floor, be_level) if step_floor > 0 else be_level
 
-        # 2. Query 15m Structural Swing Level Invalidation
-        swing_level = await self._get_recent_swing_level(symbol, side)
+        # 2. Query 15m Structural Swing Level Invalidation with Dynamic ATR
+        swing_level, atr_15m = await self._get_recent_swing_level(symbol, side)
         
-        # 3. Hybrid Synthesis: Combine Structure + Step Floor
+        # 3. Hybrid Synthesis: Combine Structure + Step Floor with Dynamic Anti-Choke & Hard BEP Floor
+        choke_buffer_pct = float(os.getenv("HYBRID_TRAIL_CHOKE_BUFFER_PCT", "1.0")) / 100.0
+        choke_buffer = max(mark * choke_buffer_pct, atr_15m * 0.75) if atr_15m > 0 else mark * choke_buffer_pct
+
         if side == "LONG":
             candidate_sl = step_floor
             if swing_level is not None and swing_level > sl:
                 # Market formed a higher structural low above current SL
-                # Follow swing low, guaranteed not to fall below milestone floor
+                # Follow swing low with breathing room, guaranteed not to fall below milestone floor
                 candidate_sl = max(step_floor, swing_level)
             
-            # Anti-choke breathing room: never put SL within 0.4% of mark price
-            max_allowed_sl = mark * 0.996
-            target_sl = min(candidate_sl, max_allowed_sl)
+            # Anti-choke breathing room: never choke mark price closer than 1.0% or 0.75 ATR
+            max_allowed_sl = mark - choke_buffer
+            
+            # LANTAI KERAS BEP (Hard Breakeven Floor):
+            # target_sl MUST NEVER drop below step_floor (which is locked at least at BEP + buffer)
+            target_sl = max(step_floor, min(candidate_sl, max_allowed_sl))
             
             # Only ratchet forward
             if target_sl <= sl:
@@ -1951,9 +1987,15 @@ class BybitMainnetTrader:
             if swing_level is not None and (sl == 0 or swing_level < sl):
                 candidate_sl = min(step_floor, swing_level) if step_floor > 0 else swing_level
             
-            # Anti-choke breathing room: never put SL within 0.4% of mark price
-            min_allowed_sl = mark * 1.004
-            target_sl = max(candidate_sl, min_allowed_sl)
+            # Anti-choke breathing room: never choke mark price closer than 1.0% or 0.75 ATR
+            min_allowed_sl = mark + choke_buffer
+            
+            # LANTAI KERAS BEP for SHORT:
+            # target_sl MUST NEVER rise above step_floor (locked at least at BEP - buffer)
+            if step_floor > 0:
+                target_sl = min(step_floor, max(candidate_sl, min_allowed_sl))
+            else:
+                target_sl = max(candidate_sl, min_allowed_sl)
             
             # Only ratchet downward
             if sl > 0 and target_sl >= sl:
@@ -1985,7 +2027,7 @@ class BybitMainnetTrader:
             logger.info(
                 f"[HYBRID_TRAIL] {symbol} {side} ratchet: SL {old_sl:.4f} → {target_sl:.4f} "
                 f"(quantized={quantized_sl}) | step_floor={step_floor:.4f}, "
-                f"swing_lvl={f'{swing_level:.4f}' if swing_level else 'N/A'}, mark={mark:.4f}, profit={profit_r:.2f}R"
+                f"swing_lvl={f'{swing_level:.4f}' if swing_level else 'N/A'}, atr15m={atr_15m:.5f}, mark={mark:.4f}, profit={profit_r:.2f}R"
             )
         except Exception as e:
             err_str = str(e)
