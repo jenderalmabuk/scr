@@ -128,6 +128,8 @@ async def main():
     # Calibration channel: parse + notify, but NEVER auto-execute
     # FusionXomegabot (-1003988458515) is the test channel
     orch.calib_channels.add(-1003988458515)
+    if hasattr(orch, "manual_test_channels"):
+        orch.manual_test_channels.add(-1003988458515)
     # Also add SMALL test channel if configured
     calib_env = os.getenv("SIGNAL_COPY_CALIBRATION_CHANNELS", "").strip()
     if calib_env:

@@ -432,8 +432,9 @@ def build_parser_report(
         if data_stale is not None:
             flow_bits.append("STALE" if data_stale else "fresh")
         lines.append(f"   Flow: {' | '.join(flow_bits)}")
-    if abs(funding) > 0:
-        lines.append(f"   Funding: {funding:+.4f}%")
+    funding_val = float(funding) if funding is not None else None
+    if funding_val is not None and abs(funding_val) > 0:
+        lines.append(f"   Funding: {funding_val * 100.0:+.4f}%")
     if vol_ratio:
         lines.append(f"   VolRatio: {vol_ratio:.2f}")
     if btc_bias and btc_bias != "NEUTRAL":

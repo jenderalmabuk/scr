@@ -299,6 +299,21 @@ class NexusDataBridge:
             pass
         return None
 
+    async def _fetch_bybit_live_funding(self, symbol: str) -> Optional[float]:
+        """Fetch real-time current funding rate directly from Bybit linear public ticker."""
+        try:
+            url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol.upper()}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        items = (data.get("result", {}) or {}).get("list") or []
+                        if items and items[0].get("fundingRate") is not None:
+                            return float(items[0]["fundingRate"])
+        except Exception:
+            pass
+        return None
+
     def _load_klines(self, symbol: str, tf: str, limit: int = 100) -> Optional[pd.DataFrame]:
         """Load OHLCV from parquet cache or FastAPI."""
         # Try parquet cache first (runtime/whales/tf)
@@ -550,8 +565,14 @@ class NexusDataBridge:
         else:
             regime = "UNKNOWN"
 
-        # Funding rate: extract from scan if available, else neutral
-        funding_rate = float(scan_data.get("funding", {}).get(symbol, 0.0)) or 0.0001
+        # Funding rate: live Bybit linear ticker first for real-time exchange rate
+        live_funding = await self._fetch_bybit_live_funding(symbol)
+        if live_funding is not None:
+            funding_rate = live_funding
+        elif flow_row and flow_row.get("funding_rate") is not None:
+            funding_rate = float(flow_row["funding_rate"])
+        else:
+            funding_rate = float(scan_data.get("funding", {}).get(symbol, 0.0) or 0.0)
 
         # Cache age
         scan_ts = scan_data.get("ts", 0.0)
@@ -560,7 +581,6 @@ class NexusDataBridge:
         if flow_row:
             cvd_zscore = float(flow_row.get("cvd_zscore_15m", cvd_zscore) or 0.0)
             cvd_source = flow_row.get("cvd_source", "revo_flow_context")
-            funding_rate = float(flow_row.get("funding_rate", funding_rate) or 0.0)
 
         return {
             "symbol": symbol,

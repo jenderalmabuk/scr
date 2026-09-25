@@ -314,7 +314,7 @@ async def _compute_flow(symbol: str, exchange: str = "binance") -> dict:
            ORDER BY timestamp DESC LIMIT 3""",
         symbol,
     )
-    oi_delta_pct = float(oi_rows[-1]["oi_delta_pct"]) if oi_rows and oi_rows[-1].get("oi_delta_pct") else 0
+    oi_delta_pct = float(oi_rows[0]["oi_delta_pct"]) if oi_rows and oi_rows[0].get("oi_delta_pct") else 0
 
     # Funding from DB (Bybit)
     funding_rows = await query(
@@ -323,7 +323,7 @@ async def _compute_flow(symbol: str, exchange: str = "binance") -> dict:
            ORDER BY timestamp DESC LIMIT 30""",
         symbol,
     )
-    funding_rate = float(funding_rows[-1]["funding_rate"]) if funding_rows else 0
+    funding_rate = float(funding_rows[0]["funding_rate"]) if funding_rows else 0
     funding_zscores = [float(r["funding_zscore"]) for r in funding_rows if r.get("funding_zscore") is not None]
     funding_z = _zscore(np.array(funding_zscores)) if len(funding_zscores) >= 5 else 0
 

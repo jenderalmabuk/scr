@@ -102,6 +102,7 @@ class SignalCopyOrchestrator:
         self._accum_log: list = []
         # Discord channels used as a READ-ONLY calibration intake (report only).
         self.calib_channels: set = set(getattr(scfg, "CALIB_DISCORD_CHANNELS", []) or [])
+        self.manual_test_channels: set = {-1003988458515}
         self.sizer = ConvictionSizer()
         # self.vip_reporter = VIPSessionReporter(self._notify, accum_log=self._accum_log)  # TODO: wire VIP later
         self.vip_reporter = None  # Stub for now
@@ -449,15 +450,16 @@ class SignalCopyOrchestrator:
             # Not a structured trade call — route by classification.
             if cls.type == MessageType.WHALE_ACCUM:
                 await self._handle_accumulation(text, source_name, source_chat_id, cls)
-            elif calib and image:
-                # Calibration forward we couldn't read: still reply so the user
-                # knows it was received (avoids silent no-response).
+            elif image and (source_chat_id is not None and source_chat_id in getattr(self, "manual_test_channels", {-1003988458515})):
+                # Calibration forward we couldn't read: only reply if from manual test sandbox channel
                 await self._notify(
                     "🖼️ Chart diterima di channel kalibrasi tapi tidak bisa dibaca "
                     "(vision tidak mengembalikan pair/side/entry). Coba kirim chart "
                     "dengan pair & level yang jelas."
                 )
             else:
+                if image and calib:
+                    logger.info("[SIGNAL_COPY] unparseable chart from shadow channel %s (%s) ignored", source_chat_id, source_name)
                 logger.info("[SIGNAL_COPY] %s", build_read_report(text, cls, None))
             return  # nothing to execute from a non-signal message
 
