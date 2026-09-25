@@ -24,7 +24,7 @@ def format_price(price: float) -> str:
 
 
 def get_tradingview_link(symbol: str, timeframe: str = "15m") -> str:
-    """Generate TradingView link for symbol, defaulting to 15m with MA study loaded."""
+    """Generate TradingView link for Bybit symbol, defaulting to 15m with MA study loaded."""
     clean_symbol = str(symbol).strip().upper().lstrip("$").lstrip("#")
     if clean_symbol.endswith(".P"):
         clean_symbol = clean_symbol[:-2]
@@ -35,7 +35,19 @@ def get_tradingview_link(symbol: str, timeframe: str = "15m") -> str:
     else:
         tv_symbol = f"{clean_symbol}USDT.P"
     interval = "15" if str(timeframe or "15m").lower() in {"15m", "15"} else str(timeframe).lower().rstrip("m")
-    return f"https://www.tradingview.com/chart/?symbol=BINANCE:{tv_symbol}&interval={interval}&studies=MASimple@tv-basicstudies"
+    return f"https://www.tradingview.com/chart/?symbol=BYBIT:{tv_symbol}&interval={interval}&studies=MASimple@tv-basicstudies"
+
+
+def get_bybit_trade_link(symbol: str) -> str:
+    """Generate direct Bybit trade URL for USDT linear perpetual."""
+    clean_symbol = str(symbol).strip().upper().lstrip("$").lstrip("#")
+    if clean_symbol.endswith(".P"):
+        clean_symbol = clean_symbol[:-2]
+    if clean_symbol.endswith("USD") and not clean_symbol.endswith("BUSD") and not clean_symbol.endswith("USDT") and not clean_symbol.endswith("USDC"):
+        clean_symbol = clean_symbol[:-3] + "USDT"
+    if not (clean_symbol.endswith("USDT") or clean_symbol.endswith("USDC")):
+        clean_symbol = f"{clean_symbol}USDT"
+    return f"https://www.bybit.com/trade/usdt/{clean_symbol}"
 
 
 def _mode_footer() -> str:
@@ -487,7 +499,8 @@ def build_parser_report(
 
     # Footer
     lines.append("━" * 20)
-    lines.append(f'🔗 <a href="{tv_link}">📊 Chart TradingView 15m + SMA21</a>')
+    bybit_link = get_bybit_trade_link(symbol)
+    lines.append(f'🔗 <a href="{tv_link}">📊 Chart Bybit (TradingView 15m)</a> │ <a href="{bybit_link}">⚡ Trade Bybit</a>')
     lines.append(_mode_footer())
 
     return "\n".join(lines)
@@ -541,9 +554,10 @@ def build_execution_message(
     if not ok:
         lines.append(f"❗ Reason: {reason}")
 
+    bybit_link = get_bybit_trade_link(symbol)
     lines.extend([
         "────────────────────",
-        f'🔗 <a href="{tv_link}">📊 Lihat Chart TradingView 15m + SMA21</a>',
+        f'🔗 <a href="{tv_link}">📊 Chart Bybit (TradingView 15m)</a> │ <a href="{bybit_link}">⚡ Trade Bybit</a>',
         "────────────────────",
         _mode_footer(),
     ])
@@ -615,9 +629,10 @@ def build_close_message(payload: Dict[str, Any]) -> str:
         lines.append(f"🧾 Raw Engine Reason: {raw_reason}")
 
     tv_link = get_tradingview_link(symbol)
+    bybit_link = get_bybit_trade_link(symbol)
     lines.extend([
         "────────────────────",
-        f'🔗 <a href="{tv_link}">📊 Lihat Chart TradingView 15m + SMA21</a>',
+        f'🔗 <a href="{tv_link}">📊 Chart Bybit (TradingView 15m)</a> │ <a href="{bybit_link}">⚡ Trade Bybit</a>',
         "────────────────────",
         _safe_str(payload, "footer", default="") or _mode_footer(),
     ])
@@ -648,8 +663,9 @@ def build_whale_alert_message(payload: Dict[str, Any]) -> str:
     if message:
         lines.append(message)
 
+    bybit_link = get_bybit_trade_link(symbol)
     lines.extend([
-        f'🔗 <a href="{tv_link}">📊 Lihat Chart TradingView 15m + SMA21</a>',
+        f'🔗 <a href="{tv_link}">📊 Chart Bybit (TradingView 15m)</a> │ <a href="{bybit_link}">⚡ Trade Bybit</a>',
         "────────────────────",
         _mode_footer(),
     ])

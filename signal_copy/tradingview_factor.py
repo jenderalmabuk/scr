@@ -40,7 +40,7 @@ class TradingViewFactor:
                 symbol_candidates.append(f"{base_symbol}.P")
             for tf_name, interval, _weight in TF_WEIGHTS:
                 last_error = None
-                for exchange in ("BINANCE", "BYBIT"):
+                for exchange in ("BYBIT", "BINANCE"):
                     for tv_symbol in symbol_candidates:
                         try:
                             handler = TA_Handler(
