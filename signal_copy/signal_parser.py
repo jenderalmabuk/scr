@@ -20,28 +20,28 @@ from typing import List, Optional
 from .signal_schema import ParsedSignal, SignalSide, SignalSource
 
 # --- known quote assets, longest first so matching is greedy-correct ---
-_QUOTES = ("USDT", "USDC", "BUSD", "USD", "PERP")
+_QUOTES = ("USDT", "USDC", "USD", "PERP")
 
 # Pair like "ZEC/USDT", "ZECUSDT", "BTC-USDT", "$ZEC"
 _PAIR_RE = re.compile(
     r"\b(?:pair|coin|symbol|ticker)\s*[:\-]?\s*"
-    r"[*_`]*\$?([A-Z0-9]{2,15})\s*[\/\-]?\s*(USDT|USDC|BUSD|USD)?[*_`]*",
+    r"[*_`]*\$?([A-Z0-9]{2,15})\s*[\/\-]?\s*(USDT|USDC|USD)?[*_`]*",
     re.IGNORECASE,
 )
 
 # Fallback pair detection anywhere: "ZEC/USDT", "$ZEC", or bare "ZECUSDT"
 _PAIR_INLINE_RE = re.compile(
-    r"[#\$]?\b([A-Z0-9]{1,15})\s*[\/\-]\s*(USDT|USDC|BUSD|USD)\b",
+    r"[#\$]?\b([A-Z0-9]{1,15})\s*[\/\-]\s*(USDT|USDC|USD)\b",
     re.IGNORECASE,
 )
 # Provider typo-ish form: "SYN SHORT /USDT" (base + direction + quote).
 _PAIR_SIDE_QUOTE_RE = re.compile(
-    r"[#\$]?\b([A-Z0-9]{1,15})\s+(?:LONG|SHORT|BUY|SELL)\s*[\/]\s*(USDT|USDC|BUSD|USD)\b",
+    r"[#\$]?\b([A-Z0-9]{1,15})\s+(?:LONG|SHORT|BUY|SELL)\s*[\/]\s*(USDT|USDC|USD)\b",
     re.IGNORECASE,
 )
 # Concatenated form: "ZECUSDT", "BTCUSDT PERPETUAL"
 _PAIR_CONCAT_RE = re.compile(
-    r"\$?\b([A-Z0-9]{2,12}?)(USDT|USDC|BUSD)\b",
+    r"\$?\b([A-Z0-9]{2,12}?)(USDT|USDC)\b",
     re.IGNORECASE,
 )
 # Cashtag form: "$ZETA", "$BEAT", "$MOCA" (no quote suffix) -> append USDT
