@@ -273,6 +273,8 @@ class SignalCopyOrchestrator:
         entry = _num(v.get("entry")) or 0.0
         sl = _num(v.get("stop_loss"))
         tps = [t for t in (_num(x) for x in (v.get("take_profits") or [])) if t]
+        if entry <= 0.0 and (sl is None or sl <= 0.0):
+            return None
         sig = ParsedSignal(
             symbol=symbol,
             side=SignalSide(side_raw),

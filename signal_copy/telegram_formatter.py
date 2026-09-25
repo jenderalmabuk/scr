@@ -25,10 +25,12 @@ def format_price(price: float) -> str:
 
 def get_tradingview_link(symbol: str, timeframe: str = "15m") -> str:
     """Generate TradingView link for symbol, defaulting to 15m with MA study loaded."""
-    clean_symbol = str(symbol).strip().upper()
+    clean_symbol = str(symbol).strip().upper().lstrip("$").lstrip("#")
     if clean_symbol.endswith(".P"):
-        tv_symbol = clean_symbol
-    elif clean_symbol.endswith("USDT"):
+        clean_symbol = clean_symbol[:-2]
+    if clean_symbol.endswith("USD") and not clean_symbol.endswith("BUSD") and not clean_symbol.endswith("USDT") and not clean_symbol.endswith("USDC"):
+        clean_symbol = clean_symbol[:-3] + "USDT"
+    if clean_symbol.endswith("USDT") or clean_symbol.endswith("USDC"):
         tv_symbol = f"{clean_symbol}.P"
     else:
         tv_symbol = f"{clean_symbol}USDT.P"
@@ -305,6 +307,7 @@ def build_parser_report(
     data_quality = metrics.get("data_quality")
     data_stale = metrics.get("data_stale")
     funding = metrics.get("funding_rate", 0.0)
+    funding_source = metrics.get("funding_source")
     poc = metrics.get("poc", 0.0)
     vol_ratio = metrics.get("vol_ratio", 0.0)
     regime = metrics.get("regime_label", "UNKNOWN")
@@ -433,8 +436,9 @@ def build_parser_report(
             flow_bits.append("STALE" if data_stale else "fresh")
         lines.append(f"   Flow: {' | '.join(flow_bits)}")
     funding_val = float(funding) if funding is not None else None
-    if funding_val is not None and abs(funding_val) > 0:
-        lines.append(f"   Funding: {funding_val * 100.0:+.4f}%")
+    if funding_val is not None:
+        source_label = f" │ {funding_source}" if funding_source else ""
+        lines.append(f"   Funding: {funding_val * 100.0:+.4f}%{source_label}")
     if vol_ratio:
         lines.append(f"   VolRatio: {vol_ratio:.2f}")
     if btc_bias and btc_bias != "NEUTRAL":

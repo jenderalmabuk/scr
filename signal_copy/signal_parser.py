@@ -24,7 +24,7 @@ _QUOTES = ("USDT", "USDC", "BUSD", "USD", "PERP")
 
 # Pair like "ZEC/USDT", "ZECUSDT", "BTC-USDT", "$ZEC"
 _PAIR_RE = re.compile(
-    r"(?:pair|coin|symbol|ticker)\s*[:\-]?\s*"
+    r"\b(?:pair|coin|symbol|ticker)\s*[:\-]?\s*"
     r"[*_`]*\$?([A-Z0-9]{2,15})\s*[\/\-]?\s*(USDT|USDC|BUSD|USD)?[*_`]*",
     re.IGNORECASE,
 )
@@ -45,7 +45,7 @@ _PAIR_CONCAT_RE = re.compile(
     re.IGNORECASE,
 )
 # Cashtag form: "$ZETA", "$BEAT", "$MOCA" (no quote suffix) -> append USDT
-_PAIR_CASHTAG_RE = re.compile(r"[#$]([A-Za-z][A-Za-z0-9]{1,14})\b")
+_PAIR_CASHTAG_RE = re.compile(r"[#$]([A-Za-z][A-Za-z0-9]{1,14}(?:\.P)?)\b", re.IGNORECASE)
 
 _SIDE_RE = re.compile(
     r"(?:position|side|direction|type|signal|setup(?:\s*utama)?)\s*[:\-]?\s*[*_`(]*\s*"
@@ -294,25 +294,31 @@ _BINANCE_THOUSAND = {
 }
 
 def _normalize_symbol(base: str, quote: Optional[str]) -> str:
-    base = (base or "").upper().strip().lstrip("$")
-    # Clean Bybit .P suffix (e.g. BSBUSDT.P -> BSBUSDT)
+    base = (base or "").upper().strip().lstrip("$").lstrip("#")
+    # Clean Bybit .P suffix (e.g. BSBUSDT.P -> BSBUSDT, FARTCOINUSD.P -> FARTCOINUSD)
     if base.endswith(".P"):
         base = base[:-2]
-    quote = (quote or "USDT").upper().strip()
-    if not base:
+    if base in ("USDT", "USDC", "USD", "PERP", "BUSD", ""):
         return ""
-    # If base already ends with a quote (e.g. "ZECUSDT"), keep as-is.
-    for q in _QUOTES:
-        if base.endswith(q) and base != q:
-            result = base
-            # Normalize Binance thousand-lot pairs (PEPEUSDT → 1000PEPEUSDT)
-            result = _BINANCE_THOUSAND.get(result, result)
-            return result
-    if quote == "PERP" or quote == "USD":
+    quote = (quote or "").upper().strip()
+
+    # Strip suffixes that mean perp or quote currency
+    if base.endswith("PERP") and base != "PERP":
+        base = base[:-4]
+    elif base.endswith("BUSD") and base not in ("BUSD", "ARBUSD"):
+        base = base[:-4]
+    elif base.endswith("USDT") and base != "USDT":
+        base = base[:-4]
+    elif base.endswith("USDC") and base != "USDC":
+        base = base[:-4]
+    elif base.endswith("USD") and base != "USD":
+        base = base[:-3]
+
+    if quote in ("PERP", "USD", "BUSD", ""):
         quote = "USDT"
+
     result = f"{base}{quote}"
-    result = _BINANCE_THOUSAND.get(result, result)
-    return result
+    return _BINANCE_THOUSAND.get(result, result)
 
 
 def _normalize_side(token: str) -> Optional[SignalSide]:

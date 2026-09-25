@@ -314,6 +314,21 @@ class NexusDataBridge:
             pass
         return None
 
+    async def _fetch_binance_live_funding(self, symbol: str) -> Optional[float]:
+        """Fetch real-time current funding rate from Binance Futures as fallback."""
+        try:
+            url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol.upper()}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        r = data.get("lastFundingRate")
+                        if r is not None:
+                            return float(r)
+        except Exception:
+            pass
+        return None
+
     def _load_klines(self, symbol: str, tf: str, limit: int = 100) -> Optional[pd.DataFrame]:
         """Load OHLCV from parquet cache or FastAPI."""
         # Try parquet cache first (runtime/whales/tf)
@@ -565,14 +580,20 @@ class NexusDataBridge:
         else:
             regime = "UNKNOWN"
 
-        # Funding rate: live Bybit linear ticker first for real-time exchange rate
+        # Funding rate: live Bybit linear ticker first for real-time exchange rate, fallback to Binance
         live_funding = await self._fetch_bybit_live_funding(symbol)
+        funding_source = "bybit"
+        if live_funding is None:
+            live_funding = await self._fetch_binance_live_funding(symbol)
+            funding_source = "binance"
         if live_funding is not None:
             funding_rate = live_funding
         elif flow_row and flow_row.get("funding_rate") is not None:
             funding_rate = float(flow_row["funding_rate"])
+            funding_source = "flow"
         else:
             funding_rate = float(scan_data.get("funding", {}).get(symbol, 0.0) or 0.0)
+            funding_source = "scanner"
 
         # Cache age
         scan_ts = scan_data.get("ts", 0.0)
@@ -590,6 +611,7 @@ class NexusDataBridge:
             "cvd_source": cvd_source,
             "imbalance": cvd_zscore / 3.0,
             "funding_rate": funding_rate,
+            "funding_source": funding_source,
             "funding_zscore": flow_row.get("funding_zscore"),
             "price_change_15m_pct": price_change_15m_pct,
             "regime_label": regime,
