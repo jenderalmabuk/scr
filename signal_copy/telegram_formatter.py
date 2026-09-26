@@ -453,10 +453,19 @@ def build_parser_report(
         lines.append(f"   Funding: {funding_val * 100.0:+.4f}%{source_label}")
     if vol_ratio:
         lines.append(f"   VolRatio: {vol_ratio:.2f}")
-    if btc_bias and btc_bias != "NEUTRAL":
-        lines.append(f"   BTC Bias: {btc_bias} | Corr: {btc_corr:.2f}")
+    btc_gate = metrics.get("btc_gate", {})
+    btc_diff = metrics.get("btc_diff_pct")
+    btc_vwap = metrics.get("btc_vwap")
+    
+    if btc_gate.get("is_low_beta"):
+        lines.append(f"   BTC Corr: {btc_corr:+.2f} (Low-Beta / Momentum Mandiri 🟢)")
+    elif btc_bias and btc_bias != "NEUTRAL":
+        dump_icon = "🔴" if btc_bias in ("DUMP", "BEARISH") else "🟢"
+        diff_str = f"vs VWAP {btc_diff:+.2f}%" if btc_diff is not None else ""
+        lines.append(f"   BTC 15m: {btc_bias} {dump_icon} ({diff_str}) │ Corr: {btc_corr:.2f}")
     elif btc_corr:
-        lines.append(f"   BTC Corr: {btc_corr:.2f}")
+        diff_str = f" │ VWAP Diff: {btc_diff:+.2f}%" if btc_diff is not None else ""
+        lines.append(f"   BTC Corr: {btc_corr:.2f}{diff_str}")
 
     # Section 4: Adversarial (if any). Legacy adversarial only runs after the
     # deterministic validator says VALID. In off mode it is advisory-only, so do

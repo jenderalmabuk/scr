@@ -375,6 +375,11 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
     if sl_pct is not None and sl_pct > vc.SAFETY_MAX_SL_DISTANCE_PCT:
         hard_blocks.append(f"SL distance {sl_pct:.1f}% exceeds safety cap {vc.SAFETY_MAX_SL_DISTANCE_PCT}%")
 
+    # --- BTC Correlation & Smart Dump Gate ---
+    btc_gate = metrics.get("btc_gate", {})
+    if btc_gate.get("blocked", False):
+        hard_blocks.append(btc_gate.get("reason", "BTC Dump Risk on High-Beta Pair"))
+
     factors = [
         _factor_price_freshness(sig, metrics),
         _factor_oi(sig, metrics),
@@ -419,6 +424,7 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
                 "flow_direction", "flow_source", "data_quality", "data_stale",
                 "flow_lookup_status", "flow_symbol_found", "mtf_alignment",
                 "tradingview", "chart_vision",
+                "btc_gate", "btc_correlation", "btc_bias", "btc_diff_pct", "btc_vwap",
             )
         },
     )

@@ -543,6 +543,23 @@ class SignalCopyOrchestrator:
         except Exception as exc:
             logger.warning("[TV] fetch failed for %s: %s", sig.symbol, exc)
 
+        # --- BTC Regime & Correlation Gate (Market Health Check) ---
+        try:
+            from .btc_regime_gate import get_btc_regime_gate
+            gate = get_btc_regime_gate()
+            btc_gate_res = await gate.evaluate_gate(sig.symbol, sig.side.value)
+            metrics["btc_gate"] = btc_gate_res
+            metrics["btc_correlation"] = btc_gate_res.get("correlation", 0.0)
+            metrics["btc_bias"] = btc_gate_res.get("btc_regime", "NEUTRAL")
+            metrics["btc_diff_pct"] = btc_gate_res.get("btc_diff_pct", 0.0)
+            metrics["btc_vwap"] = btc_gate_res.get("btc_vwap", 0.0)
+            logger.info("[BTC_GATE] %s %s -> allowed=%s (regime=%s, diff=%.2f%%, corr=%.2f, low_beta=%s)",
+                       sig.symbol, sig.side.value, btc_gate_res.get("allowed"),
+                       btc_gate_res.get("btc_regime"), btc_gate_res.get("btc_diff_pct", 0.0),
+                       btc_gate_res.get("correlation", 0.0), btc_gate_res.get("is_low_beta"))
+        except Exception as exc:
+            logger.warning("[BTC_GATE] evaluation failed for %s: %s", sig.symbol, exc)
+
         # --- Tahap 2.5: read the chart image (vision) for EVERY image-bearing
         # signal: (a) fill missing TP/SL/timeframe, and (b) feed a chart
         # confluence factor into validation (agreement strengthens the score). ---

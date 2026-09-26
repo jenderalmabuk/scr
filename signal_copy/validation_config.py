@@ -94,3 +94,9 @@ RSI_OVERSOLD   = 28.0
 
 # --- trend ---
 TREND_FLAT_PCT = 0.15          # |15m change%| below this = flat/neutral
+# --- BTC regime & correlation gate ---
+BTC_GATE_ENABLED = _bool_env("SIGNAL_COPY_BTC_GATE_ENABLED", True)
+BTC_DUMP_THRESHOLD_PCT = _float_env("SIGNAL_COPY_BTC_DUMP_THRESHOLD_PCT", -0.35)
+BTC_PUMP_THRESHOLD_PCT = _float_env("SIGNAL_COPY_BTC_PUMP_THRESHOLD_PCT", 0.35)
+BTC_HIGH_BETA_CORR = _float_env("SIGNAL_COPY_BTC_HIGH_BETA_CORR", 0.50)
+BTC_LOW_BETA_CORR = _float_env("SIGNAL_COPY_BTC_LOW_BETA_CORR", 0.40)
