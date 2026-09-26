@@ -172,4 +172,37 @@ async def send_open_trade(data: Dict[str, Any]) -> bool:
         return False
 
 
-__all__ = ["send_close_trade", "send_open_trade"]
+
+def _fmt_reentry(p: Dict[str, Any]) -> str:
+    symbol = p.get("symbol", "")
+    side = str(p.get("side", "")).upper()
+    entry = _f(p.get("entry_price"))
+    sl = _f(p.get("sl_price"))
+    reason = p.get("reason", "COMPRESSION_BREAKOUT")
+    comp_range = p.get("compression_range", "")
+    lines = [
+        f"🚀 <b>RE-ENTRY {symbol} {side}</b>",
+        f"Entry: <code>{entry:g}</code>",
+        f"Reason: <b>{reason}</b>",
+    ]
+    if comp_range:
+        lines.append(f"Compression Zone: <code>{comp_range}</code>")
+    if sl > 0:
+        risk_pct = abs(entry - sl) / entry * 100 if entry > 0 else 0
+        lines.append(f"New Tight SL: <code>{sl:g}</code> (-{risk_pct:.2f}%)")
+    tps = p.get("tp_prices") or []
+    if tps:
+        tp_str = ", ".join(f"{float(x):g}" for x in tps[:2])
+        lines.append(f"Targets: <code>{tp_str}</code>")
+    return "\n".join(lines)
+
+
+async def send_reentry_trade(data: Dict[str, Any]) -> bool:
+    """Send a rich RE-ENTRY notification to the trades channel."""
+    try:
+        return await _send(_fmt_reentry(data))
+    except Exception as exc:
+        logger.error("[NOTIFY] send_reentry_trade failed: %s", exc)
+        return False
+
+__all__ = ["send_close_trade", "send_open_trade", "send_reentry_trade"]

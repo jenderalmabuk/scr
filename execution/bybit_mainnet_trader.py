@@ -60,6 +60,14 @@ class BybitMainnetTrader:
         self._kline_cache: Dict[str, Dict[str, Any]] = {}
         self._load_positions()
         
+        # Compression Breakout Re-Entry Engine
+        try:
+            from execution.compression_reentry_engine import CompressionReentryEngine
+            self.reentry_engine = CompressionReentryEngine(self)
+        except Exception as re_err:
+            logger.warning(f"[BYBIT_MAINNET] Failed to init CompressionReentryEngine: {re_err}")
+            self.reentry_engine = None
+        
         logger.info(
             f"[BYBIT_MAINNET] Initialized: capital=${self.capital}, "
             f"risk=${self.risk_per_trade}/trade, max_leverage={self.max_leverage}x, "
@@ -1071,6 +1079,29 @@ class BybitMainnetTrader:
             
             self._append_history(trade)
             
+            # If final close due to damage/scratch de-risking, register for Compression Breakout Re-Entry
+            if is_final and any(k in str(reason) for k in ["DAMAGE", "SCRATCH"]):
+                if hasattr(self, "reentry_engine") and self.reentry_engine:
+                    try:
+                        orig_entry = float(pos.get("entry_price") or entry_price)
+                        orig_sl = float(pos.get("provider_sl_original") or pos.get("original_sl_price") or pos.get("sl_price") or 0.0)
+                        orig_tps = pos.get("tp_prices") or []
+                        asyncio.create_task(
+                            self.reentry_engine.register_candidate(
+                                symbol=symbol,
+                                side=side,
+                                exit_price=exit_price,
+                                original_entry=orig_entry,
+                                original_sl=orig_sl,
+                                original_qty=original_qty,
+                                original_tps=orig_tps,
+                                metadata=pos.get("metadata", {}),
+                                reason=reason,
+                            )
+                        )
+                    except Exception as reg_err:
+                        logger.warning(f"[REENTRY_REGISTER] Error registering {symbol}: {reg_err}")
+            
             # If final close, remove from positions
             if is_final:
                 self.positions.pop(symbol, None)
@@ -1415,8 +1446,19 @@ class BybitMainnetTrader:
                         original_qty = float(pos.get("qty", 0))
                         total_tps = max(1, len(tp_prices))
                         
+                        is_manual = bool(
+                            pos.get("is_manual")
+                            or (pos.get("metadata") or {}).get("imported")
+                            or (pos.get("metadata") or {}).get("manual_imported_position")
+                            or (pos.get("metadata") or {}).get("adv_snapshot", {}).get("manual_imported_position")
+                            or (pos.get("metadata") or {}).get("adv_snapshot", {}).get("manual_context_enriched")
+                        )
+                        
                         # Dynamic TP slicing: slice fraction based on total TPs provided
-                        if total_tps == 1:
+                        if is_manual and i == 0:
+                            # User rule: manual trade TP1 locks 25% profit
+                            target_fraction = float(os.getenv("MANUAL_TP1_FRACTION", "0.25"))
+                        elif total_tps == 1:
                             target_fraction = 1.0
                         elif total_tps == 2:
                             target_fraction = 0.50
@@ -1475,6 +1517,13 @@ class BybitMainnetTrader:
             if self.dynamic_exit_enabled:
                 if await self._apply_dynamic_exits(symbol, pos, mark):
                     continue
+        
+        # Check active compression breakout re-entries
+        if hasattr(self, "reentry_engine") and self.reentry_engine:
+            try:
+                await self.reentry_engine.check_reentries()
+            except Exception as re_err:
+                logger.error(f"[REENTRY_LOOP] Error checking reentries: {re_err}")
     
     def _level_hit(self, pos: Dict, mark: float, level: float, favorable: bool) -> bool:
         """Check if price level hit."""
@@ -1661,8 +1710,21 @@ class BybitMainnetTrader:
             f"mfe={scratch_excursion.get('max_favorable_r', 0):.2f}R"
         )
         
+        # Check if position is a manual trade
+        is_manual = bool(
+            pos.get("is_manual")
+            or (pos.get("metadata") or {}).get("imported")
+            or (pos.get("metadata") or {}).get("manual_imported_position")
+            or (pos.get("metadata") or {}).get("adv_snapshot", {}).get("manual_imported_position")
+            or (pos.get("metadata") or {}).get("adv_snapshot", {}).get("manual_context_enriched")
+        )
+        manual_dyn_enabled = self._config_bool("MANUAL_DYNAMIC_EXITS_ENABLED", default=False)
+        skip_scratch_damage = is_manual and not manual_dyn_enabled
+        if skip_scratch_damage:
+            logger.debug(f"[DYN_EXIT_MANUAL] {symbol} manual trade exempt from scratch/damage exit")
+
         # LAYER 1: SCRATCH_EXIT (kill zombies)
-        if self._config_bool("SCRATCH_EXIT_ENABLED", default=True):
+        if not skip_scratch_damage and self._config_bool("SCRATCH_EXIT_ENABLED", default=True):
             # Smart scratch: adaptive timeout based on TF, regime, trend
             enable_smart = os.getenv("SMART_SCRATCH_ENABLED", "true").lower() == "true"
             phase1_4h_only = os.getenv("SMART_SCRATCH_PHASE1_4H_ONLY", "false").lower() == "true"  # Phase 2: false
@@ -1712,7 +1774,7 @@ class BybitMainnetTrader:
                 )
         
         # LAYER 2: DAMAGE_REDUCER (cut confirmed losers before hard SL)
-        if self._config_bool("DAMAGE_REDUCER_ENABLED", default=True):
+        if not skip_scratch_damage and self._config_bool("DAMAGE_REDUCER_ENABLED", default=True):
             damage_min = float(os.getenv("DAMAGE_REDUCER_MIN_HOLD_MINUTES", "45"))
             damage_max_loss = float(os.getenv("DAMAGE_REDUCER_MAX_LOSS_PCT", "-2.5"))
             decision = evaluate_damage_reducer_gate(

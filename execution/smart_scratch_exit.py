@@ -454,6 +454,14 @@ def evaluate_scratch_exit_gate(
     progress_threshold = _safe_float(os.getenv('SCRATCH_EXIT_PROGRESS_R_THRESHOLD'), 0.35)
     near_tp_fraction = _safe_float(os.getenv('SCRATCH_EXIT_NEAR_TP_PROGRESS_FRACTION'), 0.75)
 
+    tp1_progress = 0.0
+    if tps and entry > 0:
+        tp1 = tps[0]
+        total = abs(tp1 - entry)
+        if total > 0:
+            favorable = (mark - entry) if side != 'SHORT' else (entry - mark)
+            tp1_progress = max(0.0, favorable / total)
+
     setup = _setup_context(position)
     manual_profile = _manual_structure_profile(position, mark, scratch_timeout_min)
     effective_timeout = scratch_timeout_min
@@ -462,16 +470,25 @@ def evaluate_scratch_exit_gate(
         timeout_multiplier = max(1.0, min(_safe_float(os.getenv('SCRATCH_EXIT_STRONG_TIMEOUT_MULT'), 1.5), 2.0))
         effective_timeout = scratch_timeout_min * timeout_multiplier
     if manual_profile['active']:
+        manual_dyn_enabled = str(os.getenv('MANUAL_DYNAMIC_EXITS_ENABLED', 'false')).lower() in {'1', 'true', 'yes'}
+        if not manual_dyn_enabled:
+            return {
+                'should_exit': False,
+                'should_partial_exit': False,
+                'action': 'DEFER',
+                'reason': 'MANUAL_TRADE_EXEMPT',
+                'effective_timeout_min': effective_timeout,
+                'progress_threshold_r': progress_threshold,
+                'time_due': False,
+                'near_breakeven': near_breakeven,
+                'tp_hit_count': tp_count,
+                'tp1_progress': round(tp1_progress, 4),
+                'setup_context': setup,
+                'manual_structure_profile': manual_profile,
+                **excursion,
+            }
         timeout_multiplier = max(timeout_multiplier, manual_profile['timeout_multiplier'])
         effective_timeout = max(effective_timeout, manual_profile['min_timeout_min'])
-
-    tp1_progress = 0.0
-    if tps and entry > 0:
-        tp1 = tps[0]
-        total = abs(tp1 - entry)
-        if total > 0:
-            favorable = (mark - entry) if side != 'SHORT' else (entry - mark)
-            tp1_progress = max(0.0, favorable / total)
 
     low_tp_progress = tp1_progress < _safe_float(os.getenv('SCRATCH_EXIT_LOW_TP_PROGRESS_FRACTION'), 0.25)
     if setup['weak_setup'] and low_tp_progress and not manual_profile['active']:
@@ -668,6 +685,35 @@ def evaluate_damage_reducer_gate(
     stage_key = None
 
     if manual_profile['active']:
+        manual_dyn_enabled = str(os.getenv('MANUAL_DYNAMIC_EXITS_ENABLED', 'false')).lower() in {'1', 'true', 'yes'}
+        if not manual_dyn_enabled:
+            return {
+                'should_exit': False,
+                'should_partial_exit': False,
+                'action': 'DEFER',
+                'reason': 'MANUAL_TRADE_EXEMPT',
+                'close_fraction': 0.0,
+                'stage_key': None,
+                'hold_minutes': hold_minutes,
+                'damage_min_hold_min': damage_min_hold_min,
+                'unrealized_pct': unrealized_pct,
+                'damage_max_loss_pct': damage_max_loss_pct,
+                'time_due': False,
+                'pct_due': False,
+                'tp_hit_count': tp_count,
+                'tp1_progress': tp1_progress,
+                'current_r': current_r,
+                'normal_min_adverse_r': normal_min_r,
+                'normal_hard_r': normal_hard_r,
+                'emergency_r': emergency_r,
+                'max_favorable_r': max_favorable_r,
+                'max_adverse_r': max_adverse_r,
+                'recovery_from_worst_r': recovery_from_worst_r,
+                'mfe_giveback': False,
+                'local_bottom_guard': False,
+                'setup_context': setup,
+                'manual_structure_profile': manual_profile,
+            }
         min_r = manual_profile['scratch_min_r']
         hard_r = manual_profile['hard_exit_r']
         manual_local_guard = local_bottom_guard and manual_profile.get('structure_intact')
