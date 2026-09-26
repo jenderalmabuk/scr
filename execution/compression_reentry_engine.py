@@ -26,7 +26,7 @@ class CompressionReentryEngine:
     def __init__(self, trader: Any):
         self.trader = trader
         self.watchlist_file = os.getenv("COMPRESSION_WATCHLIST_FILE", WATCHLIST_FILE)
-        self.watch_window_hours = float(os.getenv("COMPRESSION_REENTRY_WINDOW_HOURS", "6.0"))
+        self.watch_window_hours = float(os.getenv("COMPRESSION_REENTRY_WINDOW_HOURS", "24.0"))
         self.max_compression_range_pct = float(os.getenv("COMPRESSION_MAX_RANGE_PCT", "3.5"))
         self.volume_surge_mult = float(os.getenv("COMPRESSION_VOLUME_SURGE_MULT", "1.25"))
         self.enabled = str(os.getenv("COMPRESSION_REENTRY_ENABLED", "true")).lower() in {"1", "true", "yes"}
