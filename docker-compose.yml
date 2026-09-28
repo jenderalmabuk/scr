@@ -119,6 +119,8 @@ services:
       dockerfile: docker/bot/Dockerfile
     image: nexus-bot:latest
     container_name: nexus_gateway
+    env_file:
+      - .env
     command: ["python", "-u", "-m", "uvicorn", "gateway.run_gateway:app", "--host", "0.0.0.0", "--port", "8787"]
     user: "1000:1000"
     environment:
@@ -223,6 +225,8 @@ services:
       context: .
       dockerfile: docker/signal_copy/Dockerfile
     container_name: nexus_signal_copy
+    env_file:
+      - .env
     environment:
       PYTHONUNBUFFERED: "1"
       NEXUS_API_URL: http://fastapi:8000
