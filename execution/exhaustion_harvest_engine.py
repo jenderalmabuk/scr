@@ -26,9 +26,11 @@ class ExhaustionHarvestEngine:
         self.min_pnl_pct = float(os.getenv("EXHAUSTION_MIN_PNL_PCT", "1.8"))
         self.min_mfe_r = float(os.getenv("EXHAUSTION_MIN_MFE_R", "0.50"))
         self.harvest_fraction = float(os.getenv("EXHAUSTION_HARVEST_FRACTION", "0.50"))
-        self.vol_spike_mult = float(os.getenv("EXHAUSTION_VOL_SPIKE_MULT", "3.0"))
+        self.vol_spike_mult = float(os.getenv("EXHAUSTION_VOL_SPIKE_MULT", "2.5"))
         self.atr_expansion_mult = float(os.getenv("EXHAUSTION_ATR_EXPANSION_MULT", "2.0"))
         self.res_proximity_pct = float(os.getenv("EXHAUSTION_RESISTANCE_PROXIMITY_PCT", "0.50"))
+        self.majors = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+        self.min_pnl_majors_pct = float(os.getenv("EXHAUSTION_MIN_PNL_MAJORS_PCT", "1.5"))
 
     async def check_exhaustion_harvest(self, symbol: str, pos: Dict[str, Any], mark: float) -> bool:
         """
@@ -59,8 +61,9 @@ class ExhaustionHarvestEngine:
         if risk_dist > 0:
             current_r = (mark - entry) / risk_dist if is_long else (entry - mark) / risk_dist
 
-        # Must be in meaningful profit territory
-        if current_pnl_pct < self.min_pnl_pct and current_r < self.min_mfe_r:
+        # Must be in meaningful profit territory (adaptive: 1.5% for Majors like SOL/BTC/ETH, 1.8% for Altcoins)
+        target_min_pnl = self.min_pnl_majors_pct if symbol in self.majors else self.min_pnl_pct
+        if current_pnl_pct < target_min_pnl and current_r < self.min_mfe_r:
             return False
 
         # Fetch recent 15m klines for volume, ATR, and resistance analysis
