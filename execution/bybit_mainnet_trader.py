@@ -67,6 +67,14 @@ class BybitMainnetTrader:
         except Exception as re_err:
             logger.warning(f"[BYBIT_MAINNET] Failed to init CompressionReentryEngine: {re_err}")
             self.reentry_engine = None
+
+        # Adaptive Exhaustion & Structure Take-Profit Engine
+        try:
+            from execution.exhaustion_harvest_engine import ExhaustionHarvestEngine
+            self.exhaustion_engine = ExhaustionHarvestEngine(self)
+        except Exception as ex_init_err:
+            logger.warning(f"[BYBIT_MAINNET] Failed to init ExhaustionHarvestEngine: {ex_init_err}")
+            self.exhaustion_engine = None
         
         logger.info(
             f"[BYBIT_MAINNET] Initialized: capital=${self.capital}, "
@@ -1512,6 +1520,18 @@ class BybitMainnetTrader:
                 continue
             pos = self.positions[symbol]
             
+            # Check Adaptive Exhaustion & Structure Take-Profit Harvest
+            # If price reached an exhaustion climax (volume spike / ATR blow-off / HTF wall)
+            # while in solid profit (>= +1.8% or +0.5R) before hitting TP1, harvest partial profit and lock SL to BEP.
+            if hasattr(self, "exhaustion_engine") and self.exhaustion_engine:
+                try:
+                    if await self.exhaustion_engine.check_exhaustion_harvest(symbol, pos, mark):
+                        if symbol not in self.positions:
+                            continue
+                        pos = self.positions[symbol]
+                except Exception as ex_err:
+                    logger.error(f"[EXHAUSTION] Error evaluating exhaustion harvest for {symbol}: {ex_err}")
+
             # Dynamic exits run after provider SL/TP checks. SCRATCH_EXIT still has
             # its own TP/progress guard; DAMAGE_REDUCER remains protective for chronic losers.
             if self.dynamic_exit_enabled:

@@ -205,4 +205,37 @@ async def send_reentry_trade(data: Dict[str, Any]) -> bool:
         logger.error("[NOTIFY] send_reentry_trade failed: %s", exc)
         return False
 
-__all__ = ["send_close_trade", "send_open_trade", "send_reentry_trade"]
+
+
+def _fmt_exhaustion_harvest(p: Dict[str, Any]) -> str:
+    symbol = p.get("symbol", "")
+    side = str(p.get("side", "")).upper()
+    exit_price = _f(p.get("exit_price"))
+    pnl_pct = _f(p.get("pnl_pct"))
+    harvest_pct = p.get("harvest_pct", 50)
+    reason = p.get("reason", "Exhaustion Peak")
+    new_sl = _f(p.get("new_sl"))
+    is_manual = p.get("is_manual", False)
+
+    tag = "MANUAL " if is_manual else ""
+    lines = [
+        f"🎯 <b>EXHAUSTION HARVEST {tag}{symbol} {side}</b>",
+        f"Peak Exit: <code>{exit_price:g}</code> (<b>+{pnl_pct:.2f}%</b>)",
+        f"Harvested: <b>{harvest_pct}% Partial Close</b>",
+        f"Trigger: <code>{reason}</code>",
+    ]
+    if new_sl > 0:
+        lines.append(f"Remaining Position: <b>SL locked to BEP+buffer ({new_sl:g})</b>")
+    return "\n".join(lines)
+
+
+async def send_exhaustion_harvest_trade(data: Dict[str, Any]) -> bool:
+    """Send a rich EXHAUSTION HARVEST notification to the trades channel."""
+    try:
+        return await _send(_fmt_exhaustion_harvest(data))
+    except Exception as exc:
+        logger.error("[NOTIFY] send_exhaustion_harvest_trade failed: %s", exc)
+        return False
+
+__all__ = ["send_close_trade", "send_open_trade", "send_reentry_trade", "send_exhaustion_harvest_trade"]
+
