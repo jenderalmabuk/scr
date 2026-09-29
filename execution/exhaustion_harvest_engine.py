@@ -28,6 +28,7 @@ class ExhaustionHarvestEngine:
         self.harvest_fraction = float(os.getenv("EXHAUSTION_HARVEST_FRACTION", "0.50"))
         self.vol_spike_mult = float(os.getenv("EXHAUSTION_VOL_SPIKE_MULT", "2.5"))
         self.atr_expansion_mult = float(os.getenv("EXHAUSTION_ATR_EXPANSION_MULT", "2.0"))
+        self.res_proximity_pct = float(os.getenv("EXHAUSTION_RESISTANCE_PROXIMITY_PCT", "0.50"))
         default_majors = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,SUIUSDT,NEARUSDT"
         majors_env = os.getenv("EXHAUSTION_MAJORS_LIST", default_majors)
         self.majors = {s.strip().upper() for s in majors_env.split(",") if s.strip()}

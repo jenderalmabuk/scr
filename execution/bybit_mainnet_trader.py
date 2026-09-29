@@ -1930,6 +1930,38 @@ class BybitMainnetTrader:
                         logger.info(
                             f"[PROFIT_LOCK] {symbol} {side} locked via {trigger_desc}! SL moved {sl:.4f} → {new_sl:.4f}"
                         )
+
+                        # AUTO PARTIAL TP ON PRE-TP1 BREAKEVEN LOCK:
+                        # When moving SL to BEP because price reached >= 0.65R (or >= 70% TP1 progress),
+                        # automatically harvest partial profit so gains are locked in cash!
+                        pre_tp1_harvest_enabled = self._config_bool("PRE_TP1_HARVEST_ENABLED", default=True)
+                        if pre_tp1_triggered and pre_tp1_harvest_enabled and not pos.get("pre_tp1_harvested", False):
+                            is_manual = bool(
+                                pos.get("is_manual")
+                                or (pos.get("metadata") or {}).get("imported")
+                                or (pos.get("metadata") or {}).get("manual_imported_position")
+                            )
+                            fraction = float(os.getenv("MANUAL_TP1_FRACTION", "0.25")) if is_manual else float(os.getenv("PRE_TP1_HARVEST_FRACTION", "0.33"))
+                            qty_rem = float(pos.get("qty_remaining", pos.get("qty", 0.0)))
+                            orig_q = float(pos.get("qty", 0.0))
+                            if qty_rem > 0 and orig_q > 0:
+                                close_q = qty_rem * fraction
+                                next_rem = max(0.0, qty_rem - close_q)
+                                pos["pre_tp1_harvested"] = True
+                                pos["qty_remaining"] = next_rem
+                                logger.info(
+                                    f"[PRE_TP1_HARVEST] {symbol} {side} locking {fraction:.0%} partial profit @ {mark:.5f} "
+                                    f"alongside BEP move (mfe={mfe_r:.2f}R, prog={tp1_progress:.0%})"
+                                )
+                                await self._close_partial(
+                                    symbol=symbol,
+                                    reason=f"PRE_TP1_HARVEST_{int(fraction*100)}PCT",
+                                    exit_price=mark,
+                                    close_qty=close_q,
+                                    qty_remaining=next_rem,
+                                    sl_kind="PRE_TP1_BREAKEVEN",
+                                    full_close=next_rem <= orig_q * 0.05,
+                                )
                     except Exception as e:
                         err_str = str(e)
                         
