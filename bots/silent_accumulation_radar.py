@@ -1,15 +1,11 @@
-"""Silent Accumulation & Pre-Breakout Radar Engine.
+"""Silent Accumulation & Pre-Breakout Radar Engine (v2.0 Enhanced).
 
-Detects institutional absorption / Wyckoff accumulation signatures across 570+ symbols:
-1. Abnormal Volume Expansion (Volume Z-Score >= 1.5)
-2. Cumulative Volume Delta (CVD) Taker Buy Dominance (CVD Z-Score >= 1.2)
-3. Price Range Compression (Sideways range <= 3.5% on 15m)
-4. Open Interest (OI) Growth (Smart money positioning)
-5. Funding Rate Neutral / Negative (No retail FOMO yet / potential short squeeze)
-6. Sector & Narrative Confluence Mapping
-
-Dispatches high-conviction pre-breakout radar alerts to Telegram configured via
-RADAR_TELEGRAM_BOT_TOKEN and RADAR_TELEGRAM_CHAT_ID in .env.
+Features:
+1. Automated Accumulation Duration Measurement (No manual candle counting needed)
+2. Strict 4-Hour Minimum Consolidation Filter (Eliminates noise & false breakouts)
+3. Direct Clickable Bybit Trade Link (One-tap chart opening & order placement)
+4. Institutional Orderflow & Wyckoff Absorption Scoring (CVD, Volume, OI, Funding)
+5. Sector & Narrative Confluence Mapping
 """
 
 from __future__ import annotations
@@ -72,26 +68,32 @@ ALERT_STATE_PATH = Path("/opt/signalcopyreal/journal/silent_radar_state.json")
 # Sector & Narrative taxonomy
 SECTOR_MAP = {
     # AI & DePIN
-    "TAOUSDT": "🤖 AI / Machine Learning",
-    "NEARUSDT": "🤖 AI / Sharding L1",
-    "RENDERUSDT": "🤖 DePIN / GPU Compute",
+    "TAOUSDT": "🤖 AI / Machine Learning Subnets",
+    "NEARUSDT": "🤖 AI / User-Owned AI & L1 Sharding",
+    "RENDERUSDT": "🤖 DePIN / GPU Distributed Compute",
     "FILUSDT": "📦 DePIN / Decentralized Storage",
-    "GRTUSDT": "🤖 AI / Data Indexing",
-    "FETUSDT": "🤖 Artificial Superintelligence",
-    "WLDUSDT": "🤖 AI / Identity Protocol",
-    "ICPUSDT": "🤖 AI / Internet Computer",
-    "ARUSDT": "📦 DePIN / Permanent Storage",
-    "IOUSDT": "🤖 DePIN / GPU Cloud",
-    "ATHUSDT": "🤖 DePIN / Cloud Compute",
+    "GRTUSDT": "🤖 AI / Decentralized Data Indexing",
+    "FETUSDT": "🤖 Artificial Superintelligence Alliance",
+    "WLDUSDT": "🤖 AI / World ID Proof of Personhood",
+    "ICPUSDT": "🤖 AI / Cloud Internet Computer",
+    "ARUSDT": "📦 DePIN / Permanent Data Storage",
+    "IOUSDT": "🤖 DePIN / GPU Cloud Clustering",
+    "ATHUSDT": "🤖 DePIN / Decentralized Cloud Compute",
     
     # China / Asian Liquidity Narrative
-    "CFXUSDT": "🇨🇳 China Narrative / Conflux L1",
+    "CFXUSDT": "🇨🇳 China Narrative / Conflux Regulatory L1",
     "NEOUSDT": "🇨🇳 China / Neo Smart Economy",
-    "ACHUSDT": "🇨🇳 Asian Payments / Crypto Gateway",
-    "CKBUSDT": "🇨🇳 Nervos Network / Bitcoin L2",
-    "VETUSDT": "🇨🇳 VeChain / Enterprise Supply",
-    "GASUSDT": "🇨🇳 Neo Ecosystem Gas",
-    "QTUMUSDT": "🇨🇳 China Smart Contracts",
+    "ACHUSDT": "🇨🇳 Asian Payments / Crypto-Fiat Gateway",
+    "CKBUSDT": "🇨🇳 Nervos Network / Bitcoin L2 RGB++",
+    "VETUSDT": "🇨🇳 VeChain / Enterprise Supply Chain",
+    "GASUSDT": "🇨🇳 Neo Ecosystem Gas / Asian Liquidity",
+    "QTUMUSDT": "🇨🇳 China Smart Contracts & PoS",
+
+    # Privacy & Layer 2
+    "COTIUSDT": "🔒 Privacy Layer / Garbled Circuits L2",
+    "ROSEUSDT": "🔒 Oasis Network / Confidential EVM",
+    "SAGAUSDT": "⚡ Modular Gaming L1 / Saga Chainlets",
+    "AVAUSDT": "✈️ Web3 Travel & Payments / Travala",
 
     # High Performance L1 & L2
     "SUIUSDT": "⚡ High Performance Move L1",
@@ -100,30 +102,30 @@ SECTOR_MAP = {
     "AVAXUSDT": "🔺 Avalanche Subnet Ecosystem",
     "SOLUSDT": "☀️ Solana High Throughput L1",
     "INJUSDT": "⚡ Injective Financial L1",
-    "TIAUSDT": "🧩 Modular Data Availability",
+    "TIAUSDT": "🧩 Celestia / Modular Data Availability",
     "TONUSDT": "💎 Telegram Open Network",
 
     # DeFi & Liquid Staking
-    "LDOUSDT": "💧 Ethereum Liquid Staking",
+    "LDOUSDT": "💧 Ethereum Liquid Staking Leader",
     "AAVEUSDT": "🏦 Decentralized Lending Protocol",
-    "CRVUSDT": "⚖️ Stablecoin AMM & Liquidity",
+    "CRVUSDT": "⚖️ Stablecoin AMM & Liquidity Anchor",
     "MKRUSDT": "🏛️ Sky / MakerDAO Collateral",
-    "PENDLEUSDT": "📈 Yield Tokenization / EigenLayer",
+    "PENDLEUSDT": "📈 Yield Tokenization / Restaking",
     "ENAUSDT": "💵 Synthetic Dollar / Ethena Yield",
     "UNIUSDT": "🦄 Decentralized Exchange Protocol",
 
     # Memecoins & High Beta
     "PEPEUSDT": "🐸 Frog Culture Memecoin",
-    "BONKUSDT": "🐶 Solana Dog Meme",
+    "BONKUSDT": "🐶 Solana Dog Meme / Ecosystem",
     "BOMEUSDT": "📚 Book of Meme / Solana",
     "DOGEUSDT": "🐕 Original Doge / PoW",
-    "FLOKIUSDT": "⚔️ Floki Ecosystem / Gaming",
-    "POPCATUSDT": "🐱 Solana Cat Meme",
+    "FLOKIUSDT": "⚔️ Floki Ecosystem / Valhalla Gaming",
+    "POPCATUSDT": "🐱 Solana Cat Meme Leader",
     "WIFUSDT": "🧢 Dogwifhat / Solana Meme",
 
     # RWA (Real World Assets)
     "ONDOUSDT": "🏢 US Treasury / Institutional RWA",
-    "OMUSDT": "🏢 MANTRA Chain / RWA L1",
+    "OMUSDT": "🏢 MANTRA Chain / Regulatory RWA L1",
 }
 
 class SilentAccumulationRadar:
@@ -152,7 +154,7 @@ class SilentAccumulationRadar:
     def _http_get(self, url: str, params: Dict[str, Any] = None) -> Any:
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
-        req = urllib.request.Request(url, headers={"User-Agent": "NexusRadar/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "NexusRadar/2.0"})
         with urllib.request.urlopen(req, timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
 
@@ -160,7 +162,7 @@ class SilentAccumulationRadar:
         body = json.dumps(data).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers={
             "Content-Type": "application/json",
-            "User-Agent": "NexusRadar/1.0"
+            "User-Agent": "NexusRadar/2.0"
         })
         with urllib.request.urlopen(req, timeout=8) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -168,7 +170,7 @@ class SilentAccumulationRadar:
     async def send_telegram(self, message: str) -> bool:
         """Send radar alert to Telegram."""
         if not RADAR_BOT_TOKEN or not RADAR_CHAT_ID:
-            logger.warning("Telegram bot token or chat ID not set in environment (RADAR_TELEGRAM_BOT_TOKEN / RADAR_TELEGRAM_CHAT_ID).")
+            logger.warning("Telegram credentials not configured in environment.")
             return False
         url = f"https://api.telegram.org/bot{RADAR_BOT_TOKEN}/sendMessage"
         payload = {
@@ -189,13 +191,13 @@ class SilentAccumulationRadar:
             logger.error(f"Failed to send telegram alert: {e}")
             return False
 
-    async def fetch_bybit_klines(self, symbol: str, limit: int = 24) -> List[List]:
-        """Fetch 15m closed klines from Bybit linear."""
+    async def fetch_bybit_klines_1h(self, symbol: str, limit: int = 48) -> List[List]:
+        """Fetch 1h closed klines from Bybit linear."""
         url = "https://api.bybit.com/v5/market/kline"
         params = {
             "category": "linear",
             "symbol": symbol,
-            "interval": "15",
+            "interval": "60",
             "limit": limit
         }
         try:
@@ -207,7 +209,7 @@ class SilentAccumulationRadar:
         return []
 
     async def scan_once(self) -> List[Dict[str, Any]]:
-        """Perform a single comprehensive scan over all 570+ symbols."""
+        """Perform a single scan across all symbols with automated duration filtering."""
         target_path = FLOW_CONTEXT_PATH if FLOW_CONTEXT_PATH.exists() else FLOW_CONTEXT_FALLBACK
         if not target_path.exists():
             logger.error(f"Flow context file not found at {target_path}")
@@ -224,7 +226,6 @@ class SilentAccumulationRadar:
         cooldown_sec = 4 * 3600  # 4 hours cooldown per coin
 
         qualified_candidates = []
-
         symbols_map = flow_data.get("symbols", flow_data) if isinstance(flow_data, dict) else {}
 
         for k, v in symbols_map.items():
@@ -243,63 +244,88 @@ class SilentAccumulationRadar:
             funding = float(v.get("funding_rate") or 0.0)
             flow = str(v.get("flow_direction", "UNKNOWN")).upper()
 
-            # Accumulation gating: must have positive CVD (buyers absorbing) and volume expansion
+            # Preliminary orderflow gating:
+            # Must have positive CVD (buyers active), volume expansion, and cool funding
             if cvd_z < 0.5 or vol_z < 0.8:
                 continue
 
-            # Funding rate filter: reject overheated FOMO coins
             if funding > 0.0003: # > 0.03% means retail already chased
                 continue
 
-            # Calculate base orderflow score (0-60)
-            score = 0
-            if cvd_z >= 2.0: score += 25
-            elif cvd_z >= 1.2: score += 18
-            elif cvd_z >= 0.8: score += 10
-
-            if vol_z >= 2.5: score += 20
-            elif vol_z >= 1.5: score += 15
-            elif vol_z >= 0.8: score += 8
-
-            if oi_pct >= 0.8: score += 15
-            elif oi_pct >= 0.2: score += 10
-
-            if -0.0003 <= funding <= 0.0001: score += 10 # Neutral or negative funding bonus!
-
-            if flow in ["LONG_ONLY", "BOTH_ALLOWED"]: score += 10
-
-            if score < 45:
-                continue
-
-            # Step 2: Deep Structure Verification via 15m Klines (Price Compression Check)
-            klines = await self.fetch_bybit_klines(sym, limit=20)
-            if not klines or len(klines) < 12:
+            # Step 2: Automated Accumulation Duration Measurement via 1H Klines
+            klines = await self.fetch_bybit_klines_1h(sym, limit=48)
+            if not klines or len(klines) < 8:
                 continue
 
             # klines: [startTime, openPrice, highPrice, lowPrice, closePrice, volume, turnover]
             highs = [float(c[2]) for c in klines]
             lows = [float(c[3]) for c in klines]
-            curr_mark = float(klines[0][4]) # Current close/mark
+            closes = [float(c[4]) for c in klines]
+            curr_mark = closes[0]
 
-            comp_high = max(highs)
-            comp_low = min(lows)
+            # Measure backwards from candle 1 (last closed candle)
+            base_hours = 0
+            comp_high = highs[1]
+            comp_low = lows[1]
 
-            if comp_low <= 0:
+            for lookback in range(1, len(klines)):
+                w_h = highs[1:lookback+1]
+                w_l = lows[1:lookback+1]
+                w_max = max(w_h)
+                w_min = min(w_l)
+                if w_min <= 0:
+                    break
+                r_pct = (w_max - w_min) / w_min * 100.0
+                if r_pct <= 3.8:
+                    base_hours = lookback
+                    comp_high = w_max
+                    comp_low = w_min
+                else:
+                    break
+
+            # STRICT MINIMUM DURATION FILTER:
+            # Minimum 4 hours required to eliminate noise & bull-traps!
+            if base_hours < 4:
                 continue
 
-            range_pct = (comp_high - comp_low) / comp_low * 100.0
-
-            # SILENT ACCUMULATION REQUIREMENT:
-            # Price MUST be compressed / sideways (range <= 3.5%, ideally <= 2.2%)
-            if range_pct > 3.5:
+            range_pct = (comp_high - comp_low) / comp_low * 100.0 if comp_low > 0 else 999.0
+            if range_pct > 3.8:
                 continue
 
-            # Award bonus points for tight range compression!
-            if range_pct <= 1.8: score += 20
-            elif range_pct <= 2.5: score += 15
-            elif range_pct <= 3.5: score += 10
+            # Calculate Comprehensive Institutional Score (0-100)
+            score = 0
+            # 1. Orderflow CVD absorption (0-25)
+            if cvd_z >= 2.0: score += 25
+            elif cvd_z >= 1.2: score += 20
+            elif cvd_z >= 0.5: score += 15
 
-            if score >= 70:
+            # 2. Volume expansion (0-20)
+            if vol_z >= 2.0: score += 20
+            elif vol_z >= 1.2: score += 15
+            elif vol_z >= 0.8: score += 10
+
+            # 3. Base duration (0-25)
+            if base_hours >= 16:
+                score += 25
+                duration_badge = "💎 Institutional Base (16H+)"
+            elif base_hours >= 8:
+                score += 20
+                duration_badge = "⭐️⭐️ Solid Session Base (8H-16H)"
+            else:
+                score += 15
+                duration_badge = "⭐️ Valid Intraday Base (4H-8H)"
+
+            # 4. Range tightness (0-15)
+            if range_pct <= 2.0: score += 15
+            elif range_pct <= 3.0: score += 10
+            elif range_pct <= 3.8: score += 8
+
+            # 5. Market Bias & Funding (0-15)
+            if flow in ["LONG_ONLY", "BOTH_ALLOWED"]: score += 10
+            if funding <= 0.0001: score += 5 # Neutral or negative funding bonus
+
+            # Minimum passing score for alert dispatch
+            if score >= 60:
                 narrative = SECTOR_MAP.get(sym, "🌐 Crypto Ecosystem / Altcoin")
                 
                 # Setup metrics
@@ -316,6 +342,8 @@ class SilentAccumulationRadar:
                     "symbol": sym,
                     "score": score,
                     "mark": curr_mark,
+                    "base_hours": base_hours,
+                    "duration_badge": duration_badge,
                     "range_pct": range_pct,
                     "comp_high": comp_high,
                     "comp_low": comp_low,
@@ -337,10 +365,10 @@ class SilentAccumulationRadar:
         # Sort by score descending
         qualified_candidates = sorted(qualified_candidates, key=lambda x: x["score"], reverse=True)
 
-        logger.info(f"Scan complete. Found {len(qualified_candidates)} qualified silent accumulation setups.")
+        logger.info(f"Scan complete. Found {len(qualified_candidates)} qualified silent accumulation setups (min 4h base).")
 
         # Process alerts with cooldown
-        for cand in qualified_candidates[:5]: # Top 5 highest conviction
+        for cand in qualified_candidates[:5]:
             sym = cand["symbol"]
             last_alert = self.alert_cache.get(sym, 0)
             if now_ts - last_alert >= cooldown_sec:
@@ -357,11 +385,13 @@ class SilentAccumulationRadar:
         sym = cand["symbol"]
         score = cand["score"]
         mark = cand["mark"]
+        base_hours = cand["base_hours"]
+        duration_badge = cand["duration_badge"]
         range_pct = cand["range_pct"]
         cvd_z = cand["cvd_z"]
         vol_z = cand["vol_z"]
         oi_pct = cand["oi_pct"]
-        funding = cand["funding"] * 100.0 # to percentage
+        funding = cand["funding"] * 100.0
         flow = cand["flow"]
         narrative = cand["narrative"]
         
@@ -371,20 +401,21 @@ class SilentAccumulationRadar:
         tp2 = cand["tp2_target"]
         rr = cand["rr_ratio"]
 
-        # Quality indicator
-        stars = "⭐⭐⭐⭐⭐" if score >= 85 else "⭐⭐⭐⭐"
+        bybit_url = f"https://www.bybit.com/trade/usdt/{sym}"
+        stars = "⭐⭐⭐⭐⭐" if score >= 75 else "⭐⭐⭐⭐"
 
         msg = (
             f"🚨 <b>[RADAR] SILENT ACCUMULATION DETECTED!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"💎 <b>Pair</b>: <code>#{sym}</code>\n"
             f"🏷️ <b>Sektor/Narasi</b>: {narrative}\n"
-            f"🎯 <b>Skor Akumulasi</b>: <b>{score}/100</b> {stars}\n\n"
+            f"🎯 <b>Skor Akumulasi</b>: <b>{score}/100</b> {stars}\n"
+            f"⏱️ <b>Durasi Akumulasi</b>: <b>{base_hours:.1f} Jam</b> ({duration_badge})\n\n"
             f"📊 <b>Matriks Orderflow & Akumulasi:</b>\n"
             f"• <b>Harga Saat Ini</b>: <code>{mark:.5g}</code> USDT\n"
             f"• <b>Kompresi Harga (Sideways)</b>: <code>{range_pct:.2f}%</code> (Rentang Sempit)\n"
-            f"• <b>Volume Spike</b>: <code>+{vol_z:.2f}σ</code> (Lonjakan Serapan)\n"
-            f"• <b>CVD Taker Buy</b>: <code>+{cvd_z:.2f}σ</code> (Agresif Akumulasi)\n"
+            f"• <b>Volume Spike</b>: <code>+{vol_z:.2f}σ</code> (Serapan Pasif Whale)\n"
+            f"• <b>CVD Taker Buy</b>: <code>+{cvd_z:.2f}σ</code> (Dominasi Beli Agresif)\n"
             f"• <b>Pertumbuhan OI</b>: <code>{oi_pct:+.2f}%</code> (Uang Baru Masuk)\n"
             f"• <b>Funding Rate</b>: <code>{funding:+.4f}%</code> (Tenang / Non-FOMO)\n"
             f"• <b>Flow Bias</b>: <b>{flow}</b> 🟢\n\n"
@@ -394,13 +425,14 @@ class SilentAccumulationRadar:
             f"• <b>Target Eksplosif TP1</b>: <code>{tp1:.5g}</code> USDT (+{((tp1-trigger)/trigger*100):.1f}%)\n"
             f"• <b>Target Eksplosif TP2</b>: <code>{tp2:.5g}</code> USDT (+{((tp2-trigger)/trigger*100):.1f}%)\n"
             f"• <b>Potensi Risk/Reward</b>: <b>1 : {rr:.1f}</b>\n\n"
-            f"💡 <i>Catatan Smart Money: Terdeteksi penyerapan pasif volume tinggi saat harga sideways. Probabilitas lonjakan breakout ke atas sangat tinggi!</i>"
+            f"📲 <a href=\"{bybit_url}\"><b>👉 KLIK UNTUK BUKA CHART & ORDER DI BYBIT</b></a>\n\n"
+            f"💡 <i>Catatan: Durasi telah terverifikasi otomatis (>= 4 Jam). Pasang Conditional Order di Bybit sekarang!</i>"
         )
         return msg
 
     async def run_daemon(self, interval_sec: int = 180):
         """Run continuous background monitoring daemon."""
-        logger.info(f"Starting Silent Accumulation Radar Daemon (Interval: {interval_sec}s)...")
+        logger.info(f"Starting Silent Accumulation Radar Daemon v2.0 (Interval: {interval_sec}s)...")
         while True:
             try:
                 await self.scan_once()
@@ -409,7 +441,7 @@ class SilentAccumulationRadar:
             await asyncio.sleep(interval_sec)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Silent Accumulation Radar")
+    parser = argparse.ArgumentParser(description="Silent Accumulation Radar v2.0")
     parser.add_argument("--daemon", action="store_true", help="Run continuously as daemon")
     parser.add_argument("--interval", type=int, default=180, help="Scan interval in seconds (default: 180)")
     args = parser.parse_args()
@@ -421,4 +453,4 @@ if __name__ == "__main__":
         candidates = asyncio.run(radar.scan_once())
         print(f"\n[SCAN FINISHED] Dispatched alerts for top candidates. Total found: {len(candidates)}")
         for c in candidates:
-            print(f"  • {c['symbol']:<12} | Score: {c['score']}/100 | Range: {c['range_pct']:.2f}% | CVD: +{c['cvd_z']:.2f}s | Vol: +{c['vol_z']:.2f}s | {c['narrative']}")
+            print(f"  • {c['symbol']:<12} | Durasi: {c['base_hours']:<2} jam ({c['duration_badge']}) | Score: {c['score']}/100 | Range: {c['range_pct']:.2f}% | CVD: +{c['cvd_z']:.2f}s | Vol: +{c['vol_z']:.2f}s | {c['narrative']}")
