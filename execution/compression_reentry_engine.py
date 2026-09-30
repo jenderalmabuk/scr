@@ -1,10 +1,14 @@
-"""Compression Breakout Re-Entry Engine.
+"""Compression Breakout Re-Entry Engine (v2.0 Enhanced).
 
 Monitors trades that were closed early by de-risking mechanisms (DAMAGE_REDUCER,
-SCRATCH_EXIT, etc.). If the token forms a compression/accumulation structure and
-then executes a confirmed breakout accompanied by volume/OI surge while the original
-invalidation level remains intact, automatically re-enters the trade with a tight
-support-based Stop Loss.
+SCRATCH_EXIT, etc.). 
+
+Key Safety Enhancements (v2.0):
+1. Original Entry Corridor Guard: Strictly rejects counter-trend entries (e.g., shorting
+   after a +2% pump like VIRTUALUSDT or catching falling knives like TAIKO/AKE).
+2. Orderflow Alignment Guard: Re-entry must align with Revo flow direction and CVD momentum.
+3. Expanded Consolidation Lookback: Evaluates 12 completed 15m candles (3 hours) instead of 6 (90m).
+4. Strict Confluence: Requires true range compression (<= 3.8%) and confirmed breakout.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("fusion_nexus")
@@ -27,8 +32,10 @@ class CompressionReentryEngine:
         self.trader = trader
         self.watchlist_file = os.getenv("COMPRESSION_WATCHLIST_FILE", WATCHLIST_FILE)
         self.watch_window_hours = float(os.getenv("COMPRESSION_REENTRY_WINDOW_HOURS", "24.0"))
-        self.max_compression_range_pct = float(os.getenv("COMPRESSION_MAX_RANGE_PCT", "3.5"))
-        self.volume_surge_mult = float(os.getenv("COMPRESSION_VOLUME_SURGE_MULT", "1.25"))
+        self.max_compression_range_pct = float(os.getenv("COMPRESSION_MAX_RANGE_PCT", "3.8"))
+        self.max_corridor_pct = float(os.getenv("COMPRESSION_CORRIDOR_MAX_PCT", "1.8"))
+        self.lookback_candles = int(os.getenv("COMPRESSION_LOOKBACK_CANDLES", "12"))
+        self.volume_surge_mult = float(os.getenv("COMPRESSION_VOLUME_SURGE_MULT", "1.15"))
         self.enabled = str(os.getenv("COMPRESSION_REENTRY_ENABLED", "true")).lower() in {"1", "true", "yes"}
         self.watchlist: Dict[str, Dict[str, Any]] = {}
         self._load_watchlist()
@@ -52,6 +59,32 @@ class CompressionReentryEngine:
                 json.dump(self.watchlist, f, indent=2)
         except Exception as e:
             logger.warning(f"[REENTRY_ENGINE] Failed to save watchlist: {e}")
+
+    def _get_flow_context(self, symbol: str) -> Dict[str, Any]:
+        """Fetch latest orderflow context for symbol from Revo collector."""
+        candidate_paths = [
+            Path("/app/runtime/revo/revo_flow_context_collector.json"),
+            Path("/app/runtime/revo/revo_flow_context.json"),
+            Path("/opt/signalcopyreal/runtime/revo/revo_flow_context_collector.json"),
+            Path("/opt/signalcopyreal/runtime/revo/revo_flow_context.json"),
+        ]
+        for p in candidate_paths:
+            if p.exists():
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    sym_clean = symbol.upper()
+                    if sym_clean in data and isinstance(data[sym_clean], dict):
+                        return data[sym_clean]
+                    pair_key = f"{sym_clean.replace('USDT', '')}/USDT:USDT" if sym_clean.endswith("USDT") else sym_clean
+                    if pair_key in data and isinstance(data[pair_key], dict):
+                        return data[pair_key]
+                    for k, v in data.items():
+                        if isinstance(v, dict) and v.get("symbol") == sym_clean:
+                            return v
+                except Exception:
+                    pass
+        return {}
 
     async def register_candidate(
         self,
@@ -95,11 +128,12 @@ class CompressionReentryEngine:
         self._save_watchlist()
         logger.info(
             f"[REENTRY_WATCH] Registered {symbol} ({side}) for Compression Breakout Re-Entry | "
-            f"Exit: {exit_price:.5f} | Orig SL: {original_sl:.5f} | Window: {self.watch_window_hours:.0f}h"
+            f"Exit: {exit_price:.5f} | Orig Entry: {original_entry:.5f} | Orig SL: {original_sl:.5f} | "
+            f"Corridor: +/-{self.max_corridor_pct:.1f}% | Window: {self.watch_window_hours:.0f}h"
         )
 
     async def check_reentries(self) -> None:
-        """Evaluate active watchlist against current market compression and breakout."""
+        """Evaluate active watchlist against current market compression, corridor, and orderflow."""
         if not self.enabled or not self.watchlist:
             return
 
@@ -128,36 +162,80 @@ class CompressionReentryEngine:
                 continue
 
             side = item["side"]
-            is_long = side == "LONG"
+            is_long = (side == "LONG")
             orig_sl = float(item["original_sl"])
+            orig_entry = float(item.get("original_entry") or 0.0)
 
-            # 4. Invalidation: Did price violate original SL?
+            # 4. Invalidation Check A: Did price violate original hard SL?
             if is_long and mark <= orig_sl:
-                logger.info(f"[REENTRY_DROP] {symbol} violated original SL ({mark:.5f} <= {orig_sl:.5f})")
+                logger.info(f"[REENTRY_DROP] {symbol} violated original SL ({mark:.5f} <= {orig_sl:.5f}) - Dropped")
                 symbols_to_remove.append(symbol)
                 continue
             elif not is_long and mark >= orig_sl:
-                logger.info(f"[REENTRY_DROP] {symbol} violated original SL ({mark:.5f} >= {orig_sl:.5f})")
+                logger.info(f"[REENTRY_DROP] {symbol} violated original SL ({mark:.5f} >= {orig_sl:.5f}) - Dropped")
                 symbols_to_remove.append(symbol)
                 continue
 
-            # 5. Fetch 15m closed klines to detect compression zone & volume baseline
+            # 5. Invalidation Check B: Original Entry Corridor Guard (Anti Counter-Trend & Anti Falling-Knife)
+            # Re-entry MUST NOT occur at a price that deviates far in the adverse direction from original entry.
+            if orig_entry > 0:
+                if not is_long and mark > orig_entry * (1.0 + self.max_corridor_pct / 100.0):
+                    diff_pct = (mark - orig_entry) / orig_entry * 100.0
+                    logger.info(
+                        f"[REENTRY_DROP] {symbol} SHORT price rallied +{diff_pct:.2f}% above orig entry "
+                        f"({orig_entry:.5f} -> {mark:.5f} > +{self.max_corridor_pct:.1f}% threshold, counter-trend pump) - Dropped"
+                    )
+                    symbols_to_remove.append(symbol)
+                    continue
+                elif is_long and mark < orig_entry * (1.0 - self.max_corridor_pct / 100.0):
+                    diff_pct = (orig_entry - mark) / orig_entry * 100.0
+                    logger.info(
+                        f"[REENTRY_DROP] {symbol} LONG price plunged -{diff_pct:.2f}% below orig entry "
+                        f"({orig_entry:.5f} -> {mark:.5f} > -{self.max_corridor_pct:.1f}% threshold, falling knife) - Dropped"
+                    )
+                    symbols_to_remove.append(symbol)
+                    continue
+
+            # 6. Invalidation Check C: Orderflow & Flow Direction Alignment
+            flow_info = self._get_flow_context(symbol)
+            if flow_info:
+                flow_dir = str(flow_info.get("flow_direction", "UNKNOWN")).upper()
+                cvd_z = float(flow_info.get("cvd_zscore_15m") or flow_info.get("cvd_z") or 0.0)
+
+                # Veto opposing flow direction
+                if is_long and flow_dir == "SHORT_ONLY":
+                    logger.info(f"[REENTRY_VETO] {symbol} LONG vetoed: flow_direction is SHORT_ONLY")
+                    continue
+                elif not is_long and flow_dir == "LONG_ONLY":
+                    logger.info(f"[REENTRY_VETO] {symbol} SHORT vetoed: flow_direction is LONG_ONLY")
+                    continue
+
+                # Veto extreme opposing CVD delta
+                if is_long and cvd_z < -1.8:
+                    logger.info(f"[REENTRY_VETO] {symbol} LONG vetoed: aggressive seller pressure (cvd_z={cvd_z:.2f})")
+                    continue
+                elif not is_long and cvd_z > 1.8:
+                    logger.info(f"[REENTRY_VETO] {symbol} SHORT vetoed: aggressive buyer absorption (cvd_z={cvd_z:.2f})")
+                    continue
+
+            # 7. Fetch 15m closed klines to detect compression zone & volume baseline
             try:
+                fetch_limit = max(16, self.lookback_candles + 4)
                 klines = await asyncio.to_thread(
                     self.trader.client.get_klines,
                     symbol=symbol,
                     interval="15",
-                    limit=10,
+                    limit=fetch_limit,
                 )
             except Exception as e:
                 logger.debug(f"[REENTRY_ENGINE] Could not fetch klines for {symbol}: {e}")
                 continue
 
-            if not klines or len(klines) < 4:
+            if not klines or len(klines) < self.lookback_candles:
                 continue
 
-            # klines[0] is active forming candle; klines[1:7] are completed 15m candles
-            closed_klines = klines[1:7]
+            # klines[0] is active forming candle; klines[1:lookback+1] are completed 15m candles
+            closed_klines = klines[1 : self.lookback_candles + 1]
             highs = [float(k[2]) for k in closed_klines if len(k) > 2]
             lows = [float(k[3]) for k in closed_klines if len(k) > 3]
             volumes = [float(k[5]) for k in closed_klines if len(k) > 5]
@@ -185,12 +263,12 @@ class CompressionReentryEngine:
             # Volume / Momentum boost
             volume_boost = curr_vol >= base_vol * self.volume_surge_mult
 
-            # Confluence check: Range was in compression (or reasonable consolidate) AND breakout occurs
-            if breakout_confirmed and (range_pct <= self.max_compression_range_pct or volume_boost):
+            # Confluence check: Must have tight compression range AND confirmed breakout
+            if breakout_confirmed and range_pct <= self.max_compression_range_pct:
                 logger.info(
-                    f"[REENTRY_TRIGGER] {symbol} {side} Breakout Detected! "
-                    f"Mark={mark:.5f} vs Comp High={p_high:.5f} Low={p_low:.5f} (Range: {range_pct:.2f}%) "
-                    f"Vol={curr_vol:.1f} vs Base={base_vol:.1f}"
+                    f"[REENTRY_TRIGGER] {symbol} {side} Breakout Confirmed! "
+                    f"Mark={mark:.5f} vs Comp High={p_high:.5f} Low={p_low:.5f} (Range: {range_pct:.2f}% <= {self.max_compression_range_pct:.1f}%) "
+                    f"Vol={curr_vol:.1f} vs Base={base_vol:.1f} (Boost: {volume_boost})"
                 )
 
                 # Calculate new tight structural SL
@@ -203,7 +281,7 @@ class CompressionReentryEngine:
                     elif risk > 0.035:
                         new_sl = mark * 0.965
                 else:
-                    new_sl = p_high * 1.003
+                    new_sl = p_high * 1.003  # Just above compression resistance
                     risk = (new_sl - mark) / mark
                     if risk < 0.008:
                         new_sl = mark * 1.008
