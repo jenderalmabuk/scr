@@ -433,7 +433,10 @@ class RiskManager:
                 self.giveback_lock_until = now + timedelta(minutes=30)
                 self.daily_peak_profit = 0.0
         daily_loss_pct = (self.current_equity - self.daily_start_balance) / max(self.daily_start_balance, 1e-9)
-        if daily_loss_pct <= -0.018:
+        raw_stop = float(os.getenv('HARD_DAILY_STOP_PCT', os.getenv('MAX_DAILY_LOSS_PCT', '5.0')))
+        stop_threshold = raw_stop / 100.0 if raw_stop > 1.0 else raw_stop
+        stop_threshold = max(0.05, stop_threshold)
+        if daily_loss_pct <= -stop_threshold:
             self.hard_daily_stop_hit = True
             self.trading_enabled = False
             self.trading_disable_reason = "HARD_DAILY_STOP"

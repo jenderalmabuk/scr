@@ -403,8 +403,12 @@ def build_parser_report(
             "TIER_2_MODERATE": "Tier 2: Moderate",
             "TIER_3_PROBE": "Tier 3: Probe/Low",
             "VETO": "VETO (0% - Fakeout/Toxic)",
+            "GRADE_A_PLUS_WHALE_BACKED": "🌟 Grade A+ (Whale Backed 🐋)",
         }.get(sizing_tier, str(sizing_tier))
         lines.append(f"   💰 Alokasi Risk: <b>${dynamic_risk:.2f}</b> ({tier_label})")
+    whale_conf = (metrics.get("sizing_details") or {}).get("whale_confluence")
+    if whale_conf:
+        lines.append(f"   🐋 Paus: <b>{html.escape(str(whale_conf))}</b>")
     entry_action = metrics.get("entry_action_preview") or metrics.get("entry_action")
     entry_code = metrics.get("entry_route_code_preview") or metrics.get("entry_route_code")
     entry_conflicts = metrics.get("entry_route_conflicts_preview") or metrics.get("entry_route_conflicts") or []

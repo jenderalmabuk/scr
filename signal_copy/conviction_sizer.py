@@ -3,17 +3,73 @@
 Determines how much to risk per trade dynamically based on:
 - Adversarial Committee decision (specialists consensus, warnings, vetos)
 - Real-time Market Data (CVD flow, open interest, regime)
+- Whale CEX Confluence (Binance/Bybit whale trades & liquidations)
 - Channel historical performance (win rate, reputation via Fractional Kelly)
 - Multi-timeframe alignment (MTF trend following)
 - Signal quality & geometry (RR, clarity)
 """
 
 import os
+import json
 import logging
+from pathlib import Path
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple
 from .channel_performance import get_tracker
 
 logger = logging.getLogger(__name__)
+
+
+def check_whale_confluence(symbol: str, is_long: bool) -> Tuple[float, Optional[str], Optional[str]]:
+    """
+    Check if recent (<=20 min) whale trade or liquidation backs or opposes the trade.
+    Returns: (multiplier, tier_tag, description)
+    """
+    if not symbol:
+        return 1.0, None, None
+
+    clean_sym = symbol.strip().upper().replace("/", "").replace("-", "")
+    if not clean_sym.endswith("USDT") and not clean_sym.endswith("USDC"):
+        clean_sym = f"{clean_sym}USDT"
+
+    paths_to_check = [
+        Path("/app/runtime/whales") / f"latest_cex_whale_{clean_sym}.json",
+        Path("/opt/signalcopyreal/runtime/whales") / f"latest_cex_whale_{clean_sym}.json",
+        Path("/home/fusion_omega/fusion_omega_nexus/runtime/whales") / f"latest_cex_whale_{clean_sym}.json",
+    ]
+
+    for p in paths_to_check:
+        try:
+            if not p.exists():
+                continue
+            with open(p, "r") as f:
+                w_data = json.load(f)
+
+            ts_str = w_data.get("timestamp_utc", "")
+            if not ts_str:
+                continue
+
+            dt = datetime.fromisoformat(ts_str)
+            age_sec = (datetime.now(timezone.utc) - dt).total_seconds()
+            if age_sec > 1200:  # Older than 20 minutes
+                continue
+
+            w_bias = str(w_data.get("bias", "")).upper()
+            val_usd = float(w_data.get("value_usd", 0) or 0)
+            exchange = w_data.get("exchange", "CEX")
+            w_type = w_data.get("type", "TRADE")
+
+            if (is_long and w_bias == "BULLISH") or (not is_long and w_bias == "BEARISH"):
+                desc = f"Whale Backed ({exchange} {w_type} ${val_usd:,.0f} {w_bias})"
+                return 1.15, "GRADE_A_PLUS_WHALE_BACKED", desc
+            elif (is_long and w_bias == "BEARISH") or (not is_long and w_bias == "BULLISH"):
+                desc = f"Whale Opposed ({exchange} {w_type} ${val_usd:,.0f} {w_bias})"
+                return 0.70, "WHALE_OPPOSED", desc
+
+        except Exception as exc:
+            logger.debug("Error checking whale confluence for %s: %s", clean_sym, exc)
+
+    return 1.0, None, None
 
 
 class ConvictionSizer:
@@ -76,6 +132,7 @@ class ConvictionSizer:
 
         Returns: (target_risk_usd, sizing_tier, details_dict)
         - If vetoed (toxic fakeout): target_risk_usd = 0.0
+        - Grade A+ Whale Backed: $1.85 - $2.00
         - Tier 1 (High Conviction): $1.70 - $2.00
         - Tier 2 (Moderate Conviction): $1.00 - $1.50
         - Tier 3 (Low Conviction / Probe): $0.50 - $0.75
@@ -99,6 +156,7 @@ class ConvictionSizer:
         flow = str(metrics.get("flow_direction", "")).upper().replace(" ", "_")
         cvd_z = float(metrics.get("cvd_zscore", 0.0) or 0.0)
         is_long = getattr(signal, "is_long", True)
+        symbol = getattr(signal, "symbol", "")
 
         # Opposing flow (e.g. LONG while CVD is heavily negative)
         flow_opposing = (is_long and cvd_z < -0.8) or (not is_long and cvd_z > 0.8)
@@ -131,10 +189,8 @@ class ConvictionSizer:
             else:
                 m_adv = 0.60
         elif final_vote == "NO":
-            # Allowed as probe if not toxic
             m_adv = 0.30
         else:
-            # Fallback if committee didn't run
             m_adv = 0.80
 
         # 5. Compute Validation Score Multiplier (M_score)
@@ -163,16 +219,21 @@ class ConvictionSizer:
                 else:
                     m_channel = 0.80
             else:
-                m_channel = 0.95  # new channel buffer
+                m_channel = 0.95
 
-        # 7. Combined Multiplier & Clamp
-        combined_m = m_adv * m_score * m_channel
+        # 7. Whale Confluence Factor
+        m_whale, whale_tier_tag, whale_desc = check_whale_confluence(symbol, is_long)
+
+        # 8. Combined Multiplier & Clamp
+        combined_m = m_adv * m_score * m_channel * m_whale
         raw_risk = max_risk_usd * combined_m
 
         target_risk = round(max(min_risk_usd, min(max_risk_usd, raw_risk)), 2)
 
         # Classify Tier
-        if target_risk >= 1.70:
+        if whale_tier_tag == "GRADE_A_PLUS_WHALE_BACKED" and target_risk >= 1.70:
+            tier = "GRADE_A_PLUS_WHALE_BACKED"
+        elif target_risk >= 1.70:
             tier = "TIER_1_HIGH"
         elif target_risk >= 1.00:
             tier = "TIER_2_MODERATE"
@@ -184,6 +245,8 @@ class ConvictionSizer:
             "m_adv": round(m_adv, 2),
             "m_score": round(m_score, 2),
             "m_channel": round(m_channel, 2),
+            "m_whale": round(m_whale, 2),
+            "whale_confluence": whale_desc,
             "final_vote": final_vote,
             "validation_score": score,
             "target_risk_usd": target_risk,

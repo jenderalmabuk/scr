@@ -129,30 +129,51 @@ class SignalExecutor:
 
         risk_amount = notional * (abs(entry_price - sl_price) / entry_price) if entry_price > 0 else 0.0
 
-        # Build TP ladder: all levels from signal
-        tp_ladder = list(sig.take_profits) if sig.take_profits else []
-        tp1 = tp_ladder[0] if tp_ladder else 0.0
-        tp_full = tp_ladder[-1] if tp_ladder else 0.0
+        # Filter 3 (Anti-Wick Noise Floor): Ensure SL is at least 1.0% from entry
+        min_sl_dist = entry_price * 0.010
+        cur_dist = abs(entry_price - sl_price)
+        if cur_dist < min_sl_dist and entry_price > 0:
+            sl_price = entry_price - min_sl_dist if sig.side == SignalSide.LONG else entry_price + min_sl_dist
+            logger.info("[FILTER_3_ANTI_WICK] %s %s SL adjusted from %s to %.6g (>= 1.0%%)",
+                        sig.symbol, sig.side.value, sig.stop_loss, sl_price)
 
-        # Reject only when the whole provider target ladder is already behind
-        # market. TP1 may be a close partial and is not a validity boundary.
+        # Build Smart TP Ladder (Pure RR: 1.0R -> BEP, 2.0R -> 75% TP)
+        use_smart_rr = os.getenv("SIGNAL_COPY_USE_SMART_RR", "true").lower() in ("true", "1", "yes")
+        risk_dist = abs(entry_price - sl_price)
+
+        if use_smart_rr and risk_dist > 0:
+            smart_tp1 = entry_price + risk_dist if sig.side == SignalSide.LONG else entry_price - risk_dist
+            smart_tp2 = entry_price + (2.0 * risk_dist) if sig.side == SignalSide.LONG else entry_price - (2.0 * risk_dist)
+            tp_ladder = [smart_tp1, smart_tp2]
+            tp1 = smart_tp1
+            tp_full = smart_tp2
+            tp_payload = {
+                "tp1": smart_tp1,
+                "tp2": smart_tp2,
+            }
+            logger.info("[SMART_RR] %s %s Smart TP1 (1.0R)=%.6g, Smart TP2 (2.0R)=%.6g, SL=%.6g (Risk=%.2f%%)",
+                        sig.symbol, sig.side.value, smart_tp1, smart_tp2, sl_price, (risk_dist / entry_price) * 100.0)
+        else:
+            tp_ladder = list(sig.take_profits) if sig.take_profits else []
+            tp1 = tp_ladder[0] if tp_ladder else 0.0
+            tp_full = tp_ladder[-1] if tp_ladder else 0.0
+            tp_payload = {}
+            for i, tp in enumerate(tp_ladder, start=1):
+                tp_payload[f"tp{i}"] = tp
+
+        # Reject only if price already passed 1.0R target at time of order creation
         live_price = float(metrics.get("price", 0.0) or 0.0)
         if live_price > 0 and tp_ladder:
-            if sig.side == SignalSide.LONG and all(tp <= live_price for tp in tp_ladder):
+            if sig.side == SignalSide.LONG and live_price >= tp_ladder[0]:
                 return ExecutionOutcome(
-                    False, f"ALL_TARGETS_PASSED — price {live_price:g}",
+                    False, f"TARGET_ALREADY_PASSED — price {live_price:g} >= TP1 {tp_ladder[0]:g}",
                     sig.symbol, sig.side.value, entry_price, notional, sl_price, tp1, tp_full, risk_amount,
                 )
-            if sig.side == SignalSide.SHORT and all(tp >= live_price for tp in tp_ladder):
+            if sig.side == SignalSide.SHORT and live_price <= tp_ladder[0]:
                 return ExecutionOutcome(
-                    False, f"ALL_TARGETS_PASSED — price {live_price:g}",
+                    False, f"TARGET_ALREADY_PASSED — price {live_price:g} <= TP1 {tp_ladder[0]:g}",
                     sig.symbol, sig.side.value, entry_price, notional, sl_price, tp1, tp_full, risk_amount,
                 )
-        
-        # Map TP levels to payload keys (tp1, tp2, tp3, ... tpN)
-        tp_payload = {}
-        for i, tp in enumerate(tp_ladder, start=1):
-            tp_payload[f"tp{i}"] = tp
 
         adv_snapshot = dict(metrics)
         adv_snapshot.update({

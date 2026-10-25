@@ -30,6 +30,13 @@ from . import validation_config as vc
 from .mtf_aligner import MTFAligner
 
 
+
+LOW_LIQUID_COINS = {
+    "AKEUSDT", "GIGGLEUSDT", "EPICUSDT", "CAPUSDT", "KAITOUSDT", 
+    "BANKUSDT", "CYSUSDT", "BEATUSDT", "COTIUSDT", "UAIUSDT", "BTWUSDT", "BLESSUSDT",
+    "USELESSUSDT", "APRUSDT", "BATUSDT", "WLFIUSDT"
+}
+
 class Verdict(str, Enum):
     VALID = "VALID"
     WEAK = "WEAK"
@@ -375,10 +382,29 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
     if sl_pct is not None and sl_pct > vc.SAFETY_MAX_SL_DISTANCE_PCT:
         hard_blocks.append(f"SL distance {sl_pct:.1f}% exceeds safety cap {vc.SAFETY_MAX_SL_DISTANCE_PCT}%")
 
-    # --- BTC Correlation & Smart Dump Gate ---
+    # Filter 2: Liquid Whitelist (Reject illiquid shitcoins prone to scam wicks)
+    if sig.symbol.upper() in LOW_LIQUID_COINS:
+        hard_blocks.append(f"ILLIQUID_SYMBOL: {sig.symbol} is excluded by liquid whitelist (< $25M volume)")
+
+    # SMART RR GEOMETRY GATE: If Smart RR is active, provider inverted TP is bypassed
+    use_smart_rr = os.getenv("SIGNAL_COPY_USE_SMART_RR", "true").lower() in ("true", "1", "yes")
+    min_tp1_rr = float(os.getenv("SIGNAL_COPY_MIN_TP1_RR", "0.0" if use_smart_rr else "0.8"))
+    if not use_smart_rr and min_tp1_rr > 0:
+        tp1_rr = sig.rr_ratio(0)
+        best_rr = sig.rr_best()
+        if tp1_rr is not None and tp1_rr < min_tp1_rr:
+            if not (best_rr is not None and best_rr >= 1.5 and tp1_rr >= 0.65):
+                hard_blocks.append(f"UNFAVORABLE_GEOMETRY: TP1 RR is {tp1_rr:.2f} (minimum required is {min_tp1_rr:.2f})")
+
+    # Filter 1: Macro Guard - Block SHORTs if BTC is strongly bullish / risk-on
     btc_gate = metrics.get("btc_gate", {})
     if btc_gate.get("blocked", False):
         hard_blocks.append(btc_gate.get("reason", "BTC Dump Risk on High-Beta Pair"))
+    
+    btc_regime = str(metrics.get("btc_bias", "NEUTRAL")).upper()
+    btc_diff = float(metrics.get("btc_diff_pct", 0.0) or 0.0)
+    if sig.side.value == "SHORT" and (btc_regime in ("BULLISH", "RISK_ON") or btc_diff > 0.5):
+        hard_blocks.append(f"MACRO_GUARD: SHORT blocked because BTC regime is {btc_regime} (+{btc_diff:.2f}% above VWAP)")
 
     factors = [
         _factor_price_freshness(sig, metrics),

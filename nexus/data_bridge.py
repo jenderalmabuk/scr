@@ -275,27 +275,116 @@ class NexusDataBridge:
         return data
 
     async def _fetch_klines_from_api(self, symbol: str, tf: str, limit: int = 100) -> Optional[pd.DataFrame]:
-        """Fetch OHLCV from FastAPI (TimescaleDB)."""
+        """Fetch OHLCV from FastAPI (TimescaleDB) or live public fallback."""
+        sym_u = symbol.upper()
+
+        # 1. Try FastAPI TimescaleDB: Bybit first (691 symbols tracked), then Binance (102 symbols)
+        for exchange in ["bybit", "binance"]:
+            try:
+                url = f"{self.api_url}/klines/{exchange}/{sym_u}"
+                params = {"tf": tf, "limit": limit}
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("data"):
+                                df = pd.DataFrame(data["data"])
+                                df = df.rename(columns={
+                                    "open_time": "timestamp",
+                                    "open": "open",
+                                    "high": "high",
+                                    "low": "low",
+                                    "close": "close",
+                                    "volume": "volume",
+                                })
+                                for col in ["open", "high", "low", "close", "volume"]:
+                                    if col in df.columns:
+                                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                                return df.tail(limit).copy()
+            except Exception:
+                pass
+
+        # 2. Live fallback: Bybit Linear Public REST API (covers all 691+ Bybit USDT pairs)
         try:
-            url = f"{self.api_url}/klines/binance/{symbol}"
-            params = {"tf": tf, "limit": limit}
+            bybit_tf_map = {
+                "1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+                "1h": "60", "2h": "120", "4h": "240", "1d": "D"
+            }
+            bybit_tf = bybit_tf_map.get(tf.lower(), "5")
+            url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={sym_u}&interval={bybit_tf}&limit={limit}"
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        res = await resp.json()
+                        if res.get("retCode") == 0 and "list" in res.get("result", {}):
+                            raw_list = res["result"]["list"]
+                            if raw_list:
+                                rows = []
+                                for item in reversed(raw_list):
+                                    rows.append({
+                                        "timestamp": pd.to_datetime(int(item[0]), unit="ms", utc=True),
+                                        "open": float(item[1]),
+                                        "high": float(item[2]),
+                                        "low": float(item[3]),
+                                        "close": float(item[4]),
+                                        "volume": float(item[5]),
+                                    })
+                                df = pd.DataFrame(rows)
+                                return df.tail(limit).copy()
+        except Exception:
+            pass
+
+        # 3. Live fallback: Binance Futures Public REST API
+        try:
+            url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym_u}&interval={tf}&limit={limit}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        rows = await resp.json()
+                        if isinstance(rows, list) and rows:
+                            parsed = []
+                            for r in rows:
+                                parsed.append({
+                                    "timestamp": pd.to_datetime(int(r[0]), unit="ms", utc=True),
+                                    "open": float(r[1]),
+                                    "high": float(r[2]),
+                                    "low": float(r[3]),
+                                    "close": float(r[4]),
+                                    "volume": float(r[5]),
+                                })
+                            df = pd.DataFrame(parsed)
+                            return df.tail(limit).copy()
+        except Exception:
+            pass
+
+        return None
+
+    async def _fetch_bybit_live_price(self, symbol: str) -> Optional[float]:
+        """Fetch live ticker price directly from Bybit linear public ticker."""
+        try:
+            url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol.upper()}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        if data.get("data"):
-                            df = pd.DataFrame(data["data"])
-                            # Rename columns to match expected format
-                            df = df.rename(columns={
-                                "open_time": "timestamp",
-                                "open": "open",
-                                "high": "high",
-                                "low": "low",
-                                "close": "close",
-                                "volume": "volume",
-                            })
-                            return df.tail(limit).copy()
-        except Exception as e:
+                        items = (data.get("result", {}) or {}).get("list") or []
+                        if items and items[0].get("lastPrice"):
+                            return float(items[0]["lastPrice"])
+        except Exception:
+            pass
+        return None
+
+    async def _fetch_binance_live_price(self, symbol: str) -> Optional[float]:
+        """Fetch live ticker price from Binance Futures as fallback."""
+        try:
+            url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol.upper()}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("price"):
+                            return float(data["price"])
+        except Exception:
             pass
         return None
 
@@ -482,9 +571,31 @@ class NexusDataBridge:
         if df_5m is None or df_5m.empty:
             df_5m = await self._fetch_klines_from_api(symbol, "5m", limit=100)
         if df_5m is None or df_5m.empty:
+            # Emergency live price lookup before failing
+            live_p = await self._fetch_bybit_live_price(symbol)
+            if live_p is None:
+                live_p = await self._fetch_binance_live_price(symbol)
+            if live_p and live_p > 0:
+                return {
+                    "symbol": symbol,
+                    "price": live_p,
+                    "data_valid": True,
+                    "rsi": 50.0,
+                    "cvd_zscore": 0.0,
+                    "cvd_source": "fallback",
+                    "imbalance": 0.0,
+                    "funding_rate": 0.0,
+                    "funding_source": "none",
+                    "price_change_15m_pct": 0.0,
+                    "regime_label": "UNKNOWN",
+                    "source": "live_ticker_emergency",
+                    "cache_age_sec": 0.0,
+                    **price_metadata("live_ticker_emergency", 0.0),
+                }
             return {
                 "symbol": symbol,
                 "price": 0.0,
+                "data_valid": False,
                 "source": "nexus_cache",
                 "cache_age_sec": 0.0,
             }
@@ -606,6 +717,7 @@ class NexusDataBridge:
         return {
             "symbol": symbol,
             "price": price,
+            "data_valid": (price is not None and float(price) > 0),
             "rsi": rsi,
             "cvd_zscore": cvd_zscore,
             "cvd_source": cvd_source,

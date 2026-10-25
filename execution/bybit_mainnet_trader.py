@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
-from typing import Dict, Optional, Any, Tuple
+from typing import Dict, Optional, Any, Tuple, List
 
 from execution.bybit_api_client import BybitClient, BybitAPIError
 from execution.smart_scratch_exit import calculate_smart_scratch_timeout, evaluate_damage_reducer_gate, evaluate_scratch_exit_gate, update_scratch_excursion
@@ -403,7 +403,95 @@ class BybitMainnetTrader:
             return ("0", 0.0)
         qty_str = self._quantize(qty_rounded, lot_size)
         return (qty_str, float(qty_str) * entry)
-    
+
+    def _construct_3tier_tp_ladder(
+        self,
+        side: str,
+        entry: float,
+        sl: float,
+        raw_tps: List[float],
+        tick_size: float = 0.0,
+    ) -> Tuple[List[float], List[float]]:
+        """
+        Model C7: Construct 3-Tier Hybrid Payoff TP Ladder:
+        - Tier 1: Cash Lock (0.35R - 0.60R, 35% size) -> secure quick cash & trigger Breakeven
+        - Tier 2: The Meat / Core Profit (1.20R - 1.60R, 40% size) -> take core profit & lock +0.50R floor
+        - Tier 3: Whale Runner (2.50R+, 25% size) -> catch exponential trend/pumps
+        Returns: (tp_prices, tp_fractions)
+        """
+        is_long = (str(side).upper() == "LONG")
+        risk_dist = abs(entry - sl)
+        if risk_dist <= 0:
+            return raw_tps, ([1.0 / len(raw_tps)] * len(raw_tps) if raw_tps else [])
+
+        # Filter raw_tps in favorable direction
+        if is_long:
+            clean_raw = sorted([tp for tp in raw_tps if tp > entry])
+        else:
+            clean_raw = sorted([tp for tp in raw_tps if 0 < tp < entry], reverse=True)
+
+        # 1. Tier 1 (Cash Lock)
+        tier1_target_r = float(os.getenv("TP_TIER1_R", "1.00"))
+        tier1_frac = float(os.getenv("TP_TIER1_FRACTION", "0.50"))
+        tier1_price = entry + (tier1_target_r * risk_dist) if is_long else entry - (tier1_target_r * risk_dist)
+
+        # Align with provider TP1 if provider TP1 is reasonably placed (between 0.30R and 0.65R)
+        if clean_raw:
+            prov_t1 = clean_raw[0]
+            prov_r = (prov_t1 - entry) / risk_dist if is_long else (entry - prov_t1) / risk_dist
+            if 0.30 <= prov_r <= 0.65:
+                tier1_price = prov_t1
+
+        # 2. Tier 2 (Core Profit / The Meat)
+        tier2_target_r = float(os.getenv("TP_TIER2_R", "1.80"))
+        tier2_frac = float(os.getenv("TP_TIER2_FRACTION", "0.50"))
+        tier2_price = entry + (tier2_target_r * risk_dist) if is_long else entry - (tier2_target_r * risk_dist)
+
+        # Check if provider has a TP in the 1.10R - 1.70R sweetspot
+        for tp in clean_raw:
+            r_val = (tp - entry) / risk_dist if is_long else (entry - tp) / risk_dist
+            if 1.10 <= r_val <= 1.70:
+                tier2_price = tp
+                break
+
+        # 3. Tier 3 (Whale Runner)
+        tier3_target_r = float(os.getenv("TP_TIER3_R", "2.50"))
+        tier3_frac = float(os.getenv("TP_TIER3_FRACTION", "0.25"))
+        tier3_price = entry + (tier3_target_r * risk_dist) if is_long else entry - (tier3_target_r * risk_dist)
+
+        # If provider has a higher TP >= 2.0R, align or use max
+        if clean_raw:
+            highest_prov_tp = clean_raw[-1]
+            prov_highest_r = (highest_prov_tp - entry) / risk_dist if is_long else (entry - highest_prov_tp) / risk_dist
+            if prov_highest_r >= 2.0:
+                if is_long:
+                    tier3_price = max(tier3_price, highest_prov_tp)
+                else:
+                    tier3_price = min(tier3_price, highest_prov_tp)
+
+        # Ensure strict monotonic order: Tier1 < Tier2 < Tier3 for LONG, Tier1 > Tier2 > Tier3 for SHORT
+        if is_long:
+            if tier2_price <= tier1_price:
+                tier2_price = tier1_price + (0.50 * risk_dist)
+            if tier3_price <= tier2_price:
+                tier3_price = tier2_price + (1.00 * risk_dist)
+        else:
+            if tier2_price >= tier1_price:
+                tier2_price = tier1_price - (0.50 * risk_dist)
+            if tier3_price >= tier2_price:
+                tier3_price = tier2_price - (1.00 * risk_dist)
+
+        # Quantize to tick size if provided
+        if tick_size > 0:
+            tier1_price = float(self._quantize(tier1_price, tick_size))
+            tier2_price = float(self._quantize(tier2_price, tick_size))
+            tier3_price = float(self._quantize(tier3_price, tick_size))
+
+        ladder = [tier1_price, tier2_price, tier3_price]
+        fractions = [tier1_frac, tier2_frac, tier3_frac]
+
+        return ladder, fractions
+
     async def open_position(
         self,
         symbol: str,
@@ -562,6 +650,28 @@ class BybitMainnetTrader:
             notional = float(exchange_position.get("positionValue") or (actual_qty * actual_entry))
             actual_risk_amount = actual_qty * abs(actual_entry - sl_price)
             now = datetime.now(timezone.utc)
+
+            # Construct Model C7 (3-Tier Hybrid Payoff TP Ladder) if enabled
+            final_tps = list(tp_prices or [])
+            tp_fractions = []
+            if self._config_bool("HYBRID_3TIER_TP_ENABLED", default=True) and sl_price > 0:
+                try:
+                    final_tps, tp_fractions = self._construct_3tier_tp_ladder(
+                        side=side,
+                        entry=actual_entry,
+                        sl=sl_price,
+                        raw_tps=final_tps,
+                        tick_size=tick_size,
+                    )
+                    logger.info(
+                        f"[BYBIT_MAINNET] 3-TIER TP LADDER configured for {symbol} {side}: "
+                        f"TP1={final_tps[0]:.6f} ({tp_fractions[0]:.0%}), "
+                        f"TP2={final_tps[1]:.6f} ({tp_fractions[1]:.0%}), "
+                        f"TP3={final_tps[2]:.6f} ({tp_fractions[2]:.0%})"
+                    )
+                except Exception as tp_err:
+                    logger.warning(f"[BYBIT_MAINNET] Error constructing 3-tier TP ladder for {symbol}: {tp_err}")
+
             position = {
                 "symbol": symbol,
                 "exchange": "bybit",
@@ -571,7 +681,8 @@ class BybitMainnetTrader:
                 "original_sl_price": sl_price,
                 "provider_sl_original": sl_price,
                 "initial_risk_distance": abs(actual_entry - sl_price),
-                "tp_prices": tp_prices,
+                "tp_prices": final_tps,
+                "tp_fractions": tp_fractions,
                 "tp_hit": [],
                 "qty": str(actual_qty),
                 "qty_remaining": actual_qty,
@@ -595,7 +706,7 @@ class BybitMainnetTrader:
             
             logger.info(
                 f"[BYBIT_MAINNET] OPENED {side} {symbol} @ {actual_entry:.6f} | "
-                f"qty={actual_qty:g} | SL={sl_price:.6f} | TP1={(tp_prices[0] if tp_prices else 0):.6f}"
+                f"qty={actual_qty:g} | SL={sl_price:.6f} | TP1={(final_tps[0] if final_tps else 0):.6f}"
             )
             
             try:
@@ -668,11 +779,13 @@ class BybitMainnetTrader:
                 return {"ok": False, "executed": False, "code": "ALREADY_OPEN",
                         "reason": f"{symbol} already open"}
             
-            # Validate price quote
+            # Validate price quote (or auto-fetch fresh quote if not supplied by caller)
             quote = params.get("execution_price_quote")
             if not isinstance(quote, dict) or quote.get("price_fresh") is not True:
-                return {"ok": False, "executed": False, "code": "PRICE_PROVENANCE_REQUIRED",
-                        "reason": "Fresh price quote required"}
+                quote = await self._get_fresh_open_quote(symbol)
+                if not isinstance(quote, dict) or quote.get("price_fresh") is not True:
+                    return {"ok": False, "executed": False, "code": "PRICE_PROVENANCE_REQUIRED",
+                            "reason": "Fresh price quote required"}
             
             try:
                 observed_at = datetime.fromisoformat(str(quote["price_observed_at"]).replace("Z", "+00:00"))
@@ -1377,8 +1490,15 @@ class BybitMainnetTrader:
                         migrated = True
 
             # Check for new positions (opened externally)
+            allow_external_import = self._config_bool("BYBIT_IMPORT_EXTERNAL_POSITIONS", default=False)
             for symbol, ex_pos in exchange_map.items():
                 if symbol not in self.positions:
+                    if not allow_external_import:
+                        logger.warning(
+                            f"[BYBIT_MAINNET] External position {symbol} detected on exchange but ignored "
+                            f"(BYBIT_IMPORT_EXTERNAL_POSITIONS=false). Safe from manual interference."
+                        )
+                        continue
                     logger.warning(
                         f"[BYBIT_MAINNET] {symbol} found on exchange but not in local state, "
                         f"importing..."
@@ -1463,7 +1583,10 @@ class BybitMainnetTrader:
                         )
                         
                         # Dynamic TP slicing: slice fraction based on total TPs provided
-                        if is_manual and i == 0:
+                        tp_fractions = pos.get("tp_fractions") or []
+                        if i < len(tp_fractions):
+                            target_fraction = float(tp_fractions[i])
+                        elif is_manual and i == 0:
                             # User rule: manual trade TP1 locks 25% profit
                             target_fraction = float(os.getenv("MANUAL_TP1_FRACTION", "0.25"))
                         elif total_tps == 1:
@@ -1493,7 +1616,14 @@ class BybitMainnetTrader:
                         pos["tp_hit"] = tp_hit
                         pos["qty_remaining"] = qty_remaining
                         
-                        reason_str = f"TP{i+1}_FINAL" if is_last_tp else f"TP{i+1}"
+                        if is_last_tp:
+                            reason_str = f"TP{i+1}_FINAL"
+                        elif tp_fractions and i == 0:
+                            reason_str = "TP1_TIER1_CASH"
+                        elif tp_fractions and i == 1:
+                            reason_str = "TP2_TIER2_CORE"
+                        else:
+                            reason_str = f"TP{i+1}"
                         
                         # Close partial or full position
                         await self._close_partial(
@@ -2049,21 +2179,23 @@ class BybitMainnetTrader:
         
         if side == "LONG":
             be_level = entry + be_buffer
+            tier2_floor = entry + (risk_distance * 0.50)
             if tp_hit_count >= 3 or profit_r >= 3.0:
                 # After TP3 or 3.0R: Floor is locked at TP2
                 step_floor = max(step_floor, tp2)
             elif tp_hit_count >= 2 or profit_r >= 2.0:
-                # After TP2 or 2.0R: Floor is locked at TP1
-                step_floor = max(step_floor, tp1)
+                # After TP2 or 2.0R: Floor is locked at TP1 or +0.50R profit
+                step_floor = max(step_floor, tp1, tier2_floor)
             elif tp_hit_count >= 1 or locked or profit_r >= 1.5:
                 # After TP1 or 1.5R: Floor is locked at Breakeven + buffer
                 step_floor = max(step_floor, be_level)
         else:
             be_level = entry - be_buffer
+            tier2_floor = entry - (risk_distance * 0.50)
             if tp_hit_count >= 3 or profit_r >= 3.0:
                 step_floor = min(step_floor, tp2) if step_floor > 0 else tp2
             elif tp_hit_count >= 2 or profit_r >= 2.0:
-                step_floor = min(step_floor, tp1) if step_floor > 0 else tp1
+                step_floor = min(step_floor, tp1, tier2_floor) if step_floor > 0 else min(tp1, tier2_floor)
             elif tp_hit_count >= 1 or locked or profit_r >= 1.5:
                 step_floor = min(step_floor, be_level) if step_floor > 0 else be_level
 

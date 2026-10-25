@@ -233,23 +233,27 @@ def route_entry(
         max_chase_r = _f(getattr(vc, "MAX_CHASE_R", 0.50), 0.50)
         min_remaining_rr = _f(getattr(vc, "MIN_REMAINING_RR", 0.30), 0.30)
 
-        # Check TP1
-        tp1 = float(sig.take_profits[0]) if sig.take_profits else 0.0
-        tp1_hit = (price >= tp1 if sig.is_long else price <= tp1) if tp1 > 0 else False
-
-        # Remaining RR to TP1
+        # Smart RR: Define TP1 as 1.0R from boundary
+        use_smart_rr = os.getenv("SIGNAL_COPY_USE_SMART_RR", "true").lower() in ("true", "1", "yes")
         current_risk = abs(price - sl)
-        remaining_profit_tp1 = abs(tp1 - price) if tp1 > 0 else 0.0
-        remaining_rr_tp1 = remaining_profit_tp1 / current_risk if current_risk > 0 else 0.0
-
-        # Check if higher targets (TP2, TP3) offer attractive reward
-        has_attractive_runner = False
-        if len(sig.take_profits) > 1:
-            best_tp = float(sig.take_profits[-1])
-            rem_best_profit = abs(best_tp - price)
-            rem_best_rr = rem_best_profit / current_risk if current_risk > 0 else 0.0
-            if rem_best_rr >= 1.0:
-                has_attractive_runner = True
+        if use_smart_rr:
+            tp1 = boundary + orig_risk if sig.is_long else boundary - orig_risk
+            tp1_hit = (price >= tp1 if sig.is_long else price <= tp1) if tp1 > 0 else False
+            remaining_profit_tp1 = abs(tp1 - price) if tp1 > 0 else 0.0
+            remaining_rr_tp1 = remaining_profit_tp1 / current_risk if current_risk > 0 else 0.0
+            has_attractive_runner = True
+        else:
+            tp1 = float(sig.take_profits[0]) if sig.take_profits else 0.0
+            tp1_hit = (price >= tp1 if sig.is_long else price <= tp1) if tp1 > 0 else False
+            remaining_profit_tp1 = abs(tp1 - price) if tp1 > 0 else 0.0
+            remaining_rr_tp1 = remaining_profit_tp1 / current_risk if current_risk > 0 else 0.0
+            has_attractive_runner = False
+            if len(sig.take_profits) > 1:
+                best_tp = float(sig.take_profits[-1])
+                rem_best_profit = abs(best_tp - price)
+                rem_best_rr = rem_best_profit / current_risk if current_risk > 0 else 0.0
+                if rem_best_rr >= 1.0:
+                    has_attractive_runner = True
 
         # RSI exhaustion check
         rsi = _f(metrics.get("rsi"), 50.0)

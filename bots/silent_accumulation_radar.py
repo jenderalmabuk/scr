@@ -402,7 +402,20 @@ class SilentAccumulationRadar:
         rr = cand["rr_ratio"]
 
         bybit_url = f"https://www.bybit.com/trade/usdt/{sym}"
+        tv_url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{sym}.P"
         stars = "⭐⭐⭐⭐⭐" if score >= 75 else "⭐⭐⭐⭐"
+
+        whale_note = ""
+        try:
+            w_file = Path("/opt/signalcopyreal/runtime/whales") / f"latest_cex_whale_{sym}.json"
+            if w_file.exists():
+                import json
+                w_info = json.loads(w_file.read_text())
+                if w_info.get("bias") == "BULLISH":
+                    stars = "⭐⭐⭐⭐⭐ [GRADE A+ WHALE BACKED]"
+                    whale_note = f"🐋 <b>Whale Confluence:</b> Terdeteksi Akumulasi Paus CEX (${float(w_info.get('value_usd',0)):,.0f})! 🟢\n"
+        except Exception:
+            pass
 
         msg = (
             f"🚨 <b>[RADAR] SILENT ACCUMULATION DETECTED!</b>\n"
@@ -418,15 +431,17 @@ class SilentAccumulationRadar:
             f"• <b>CVD Taker Buy</b>: <code>+{cvd_z:.2f}σ</code> (Dominasi Beli Agresif)\n"
             f"• <b>Pertumbuhan OI</b>: <code>{oi_pct:+.2f}%</code> (Uang Baru Masuk)\n"
             f"• <b>Funding Rate</b>: <code>{funding:+.4f}%</code> (Tenang / Non-FOMO)\n"
-            f"• <b>Flow Bias</b>: <b>{flow}</b> 🟢\n\n"
+            f"• <b>Flow Bias</b>: <b>{flow}</b> 🟢\n"
+            f"{whale_note}\n"
             f"🚀 <b>Rencana Setup Pre-Breakout:</b>\n"
             f"• <b>Level Trigger Breakout</b>: <code>{trigger:.5g}</code> USDT\n"
             f"• <b>Support Invalidation (SL)</b>: <code>{support:.5g}</code> USDT\n"
             f"• <b>Target Eksplosif TP1</b>: <code>{tp1:.5g}</code> USDT (+{((tp1-trigger)/trigger*100):.1f}%)\n"
             f"• <b>Target Eksplosif TP2</b>: <code>{tp2:.5g}</code> USDT (+{((tp2-trigger)/trigger*100):.1f}%)\n"
             f"• <b>Potensi Risk/Reward</b>: <b>1 : {rr:.1f}</b>\n\n"
-            f"📲 <a href=\"{bybit_url}\"><b>👉 KLIK UNTUK BUKA CHART & ORDER DI BYBIT</b></a>\n\n"
-            f"💡 <i>Catatan: Durasi telah terverifikasi otomatis (>= 4 Jam). Pasang Conditional Order di Bybit sekarang!</i>"
+            f"📈 <a href=\"{tv_url}\"><b>👉 KLIK BUKA CHART TRADINGVIEW ({sym}.P)</b></a>\n"
+            f"📲 <a href=\"{bybit_url}\"><b>👉 KLIK BUKA PAIR DI BYBIT MAINNET</b></a>\n\n"
+            f"💡 <i>Catatan: Durasi telah terverifikasi otomatis (>= 4 Jam). Pasang Conditional Order sekarang!</i>"
         )
         return msg
 

@@ -225,16 +225,21 @@ def _geometry_rr(sig: Any, metrics: Dict[str, Any]) -> CommitteeVote:
     if wrong_tps:
         return _mk_vote("geometry_rr", NO, 3, 0.96, "take profit is on the wrong side of entry", entry=entry, wrong_tps=wrong_tps)
 
+    use_smart_rr = os.getenv("SIGNAL_COPY_USE_SMART_RR", "true").lower() in ("true", "1", "yes")
     risk = abs(entry - sl)
-    rr_values = [abs(tp - entry) / risk for tp in tps] if risk > 0 else []
-    best_rr = max(rr_values) if rr_values else 0.0
-    tp1_rr = rr_values[0] if rr_values else 0.0
     sl_pct = risk / entry * 100.0 if entry > 0 else 0.0
 
-    if best_rr < 1.0:
-        return _mk_vote("geometry_rr", NO, 3, 0.93, "best target offers less than 1R", best_rr=round(best_rr, 3), tp1_rr=round(tp1_rr, 3))
-    if tp1_rr < _f(getattr(scfg, "COMMITTEE_TP1_WARN_RR", 0.80), 0.80):
-        return _mk_vote("geometry_rr", WARN, 2, 0.80, "TP1 reward is weak", tp1_rr=round(tp1_rr, 3), best_rr=round(best_rr, 3))
+    if not use_smart_rr:
+        rr_values = [abs(tp - entry) / risk for tp in tps] if risk > 0 else []
+        best_rr = max(rr_values) if rr_values else 0.0
+        tp1_rr = rr_values[0] if rr_values else 0.0
+        if best_rr < 1.0:
+            return _mk_vote("geometry_rr", NO, 3, 0.93, "best target offers less than 1R", best_rr=round(best_rr, 3), tp1_rr=round(tp1_rr, 3))
+        if tp1_rr < _f(getattr(scfg, "COMMITTEE_TP1_WARN_RR", 0.80), 0.80):
+            return _mk_vote("geometry_rr", WARN, 2, 0.80, "TP1 reward is weak", tp1_rr=round(tp1_rr, 3), best_rr=round(best_rr, 3))
+    else:
+        best_rr = 2.0
+        tp1_rr = 1.0
     safety_cap = _f(getattr(scfg, "COMMITTEE_SL_WARN_DISTANCE_PCT", 20.0), 20.0)
     if sl_pct > safety_cap:
         return _mk_vote("geometry_rr", WARN, 2, 0.85, "SL distance is unusually wide", sl_pct=round(sl_pct, 3), cap=safety_cap)
@@ -356,15 +361,19 @@ def _final_vote(votes: List[CommitteeVote]) -> str:
 
 def _action(final_vote: str, votes: List[CommitteeVote], validation_score: float) -> str:
     mode = str(getattr(scfg, "COMMITTEE_MODE", "shadow") or "shadow").strip().lower()
-    if mode in {"shadow", "advisory", "off"} or final_vote != NO:
+    if mode in {"shadow", "advisory", "off"}:
+        return ACTION_NONE
+    if final_vote != NO:
+        # In active/hard mode, check if there are severe warning flags
+        if mode in {"hard", "active"} and any("TP1 reward is weak" in (v.reason or "") or "4h and daily trends oppose" in (v.reason or "") for v in votes):
+            return ACTION_REJECT
         return ACTION_NONE
     floor = _f(getattr(scfg, "COMMITTEE_SOFT_FLOOR", 90.0), 90.0)
     if mode == "soft":
         return ACTION_DOWNGRADE if validation_score < floor else ACTION_NONE
-    if mode == "hard":
-        hard_no = int(getattr(scfg, "COMMITTEE_HARD_NO_VOTES", 3) or 3)
+    if mode in {"hard", "active"}:
         no_votes = [v for v in votes if v.vote == NO]
-        if len(no_votes) >= hard_no or any(v.severity >= 3 for v in no_votes):
+        if len(no_votes) >= 1 or any(v.severity >= 2 for v in no_votes):
             return ACTION_REJECT
     return ACTION_NONE
 

@@ -67,20 +67,44 @@ def _rsi(closes: List[float], period: int = 14) -> List[Optional[float]]:
 async def _fetch_klines(symbol: str, interval: str = "15m", limit: int = 96):
     if not _HTTPX:
         return None
+    # 1. Try Binance Futures public endpoint
     url = f"{_BINANCE_FAPI}/fapi/v1/klines"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(url, params={"symbol": symbol, "interval": interval, "limit": limit})
-            r.raise_for_status()
-            rows = r.json()
-        # each: [openTime, open, high, low, close, volume, ...]
-        return [
-            (int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5]))
-            for x in rows
-        ]
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(url, params={"symbol": symbol.upper(), "interval": interval, "limit": limit})
+            if r.status_code == 200:
+                rows = r.json()
+                if isinstance(rows, list) and rows:
+                    return [
+                        (int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5]))
+                        for x in rows
+                    ]
     except Exception as exc:
-        logger.warning("[CHART] kline fetch failed %s: %s", symbol, exc)
-        return None
+        logger.debug("[CHART] binance kline fetch failed %s: %s", symbol, exc)
+
+    # 2. Fallback to Bybit Linear public endpoint (supports all Bybit USDT pairs)
+    try:
+        bybit_map = {
+            "1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+            "1h": "60", "2h": "120", "4h": "240", "1d": "D"
+        }
+        b_interval = bybit_map.get(interval.lower(), "15")
+        bybit_url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol.upper()}&interval={b_interval}&limit={limit}"
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(bybit_url)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("retCode") == 0 and "list" in data.get("result", {}):
+                    raw_list = data["result"]["list"]
+                    if raw_list:
+                        return [
+                            (int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5]))
+                            for x in reversed(raw_list)
+                        ]
+    except Exception as exc:
+        logger.warning("[CHART] bybit fallback kline fetch failed %s: %s", symbol, exc)
+
+    return None
 
 
 async def build_chart(result: ValidationResult, *, out_dir: Optional[str] = None,

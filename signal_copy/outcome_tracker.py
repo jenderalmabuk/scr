@@ -108,10 +108,17 @@ class SignalOutcomeTracker:
             side = sig.side.value if hasattr(sig.side, "value") else str(sig.side)
             entry = float(sig.rr_entry or 0.0)
             sl = float(sig.stop_loss or 0.0)
-            tps = [float(t) for t in (sig.take_profits or []) if t]
-            if entry <= 0 or sl <= 0 or not tps:
-                return
-            tp1 = tps[0]
+            use_smart_rr = os.getenv("SIGNAL_COPY_USE_SMART_RR", "true").lower() in ("true", "1", "yes")
+            if use_smart_rr and entry > 0 and sl > 0:
+                risk = abs(entry - sl)
+                tp1 = entry + risk if side == "LONG" else entry - risk
+                tp2 = entry + (2.0 * risk) if side == "LONG" else entry - (2.0 * risk)
+                tps = [tp1, tp2]
+            else:
+                tps = [float(t) for t in (sig.take_profits or []) if t]
+                if entry <= 0 or sl <= 0 or not tps:
+                    return
+                tp1 = tps[0]
             if not self._levels_valid(side, entry, tp1, sl):
                 logger.info(
                     "[OUTCOME] skip invalid levels %s %s entry=%.6g tp1=%.6g sl=%.6g",

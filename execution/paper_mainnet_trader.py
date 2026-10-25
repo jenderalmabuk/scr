@@ -1090,6 +1090,8 @@ class PaperMainnetTrader:
             "score": float(params.get("score", 0) or 0),
             "confidence": float(params.get("confidence", 0) or 0),
             "tag": str(params.get("tag", "")),
+            "source": str(params.get("source", "")),
+            "tp_plan": str(params.get("tp_plan") or _adv_snapshot.get("tp_plan") or ""), 
         }
         _persist_positions(self.positions)
         equity_after_entry = self._apply_equity_delta(-entry_fee)
@@ -1127,7 +1129,9 @@ class PaperMainnetTrader:
                     sl = float(pos.get("sl_price") or 0)
                     if sl and self._level_hit(pos, mark, sl, favorable=False):
                         pos["sl_trigger_quote"] = quote
-                        await self._close(symbol, mark, "HARD_SL")
+                        sl_kind = str(pos.get("sl_kind", "HARD_SL"))
+                        exit_reason = "BREAKEVEN_EXIT" if "BREAKEVEN" in sl_kind else ("TRAILING_RUNNER_EXIT" if "TRAILING" in sl_kind else "HARD_SL")
+                        await self._close(symbol, mark, exit_reason)
                         continue
                     await self._apply_take_profits(symbol, mark)
                     pos = self.positions.get(symbol)
@@ -1474,7 +1478,7 @@ class PaperMainnetTrader:
                             side, symbol, new_sl, buffer, hold_min)
 
         # ── 4. TRAILING — only after profit lock + 10min (old bot two-phase) ─
-        if pos.get("locked_profit") and hold_min > 10.0 and _dyn_env_bool("TRAIL_SL_ENABLED"):
+        if (pos.get("trail_active") or (pos.get("locked_profit") and hold_min > 10.0)) and _dyn_env_bool("TRAIL_SL_ENABLED", default=True):
             atr_pct = None
             adv = pos.get("adv_snapshot")
             if isinstance(adv, dict):
@@ -1544,21 +1548,116 @@ class PaperMainnetTrader:
             hit = (pos["side"] == "LONG" and mark >= tp) or (pos["side"] == "SHORT" and mark <= tp)
             if not tp or not hit:
                 break
-            if idx == 0:
-                pos["tp1_hit"] = True
-                pos["tp1_hit_at"] = pos.get("tp1_hit_at") or datetime.now(UTC)
-                pos["shadow_cohort"] = True
-            self._record_shadow_tp(pos, idx, tp)
-            idx += 1
-            if idx == len(ladder):
-                await self._close(symbol, tp, f"TP{idx}")
-                return
-            slice_qty = float(pos["initial_qty"]) / len(ladder)
-            pos["qty"] = max(0.0, float(pos["qty"]) - slice_qty)
-            pos["next_tp_index"] = idx
-            pos["tp1_hit"] = True
-            _persist_positions(self.positions)
-            await self._realize_partial(pos, tp, slice_qty, f"TP{idx}_PARTIAL")
+            
+            is_golden_scalp = (
+                str(pos.get("source", "")).upper() in ("AUTONOMOUS_SCANNER", "SIGNAL_COPY")
+                or str(pos.get("tag", "")).startswith("auto_")
+                or pos.get("tp_plan") == "GOLDEN_SCALP"
+                or (isinstance(pos.get("adv_snapshot"), dict) and pos["adv_snapshot"].get("tp_plan") == "GOLDEN_SCALP")
+                or os.getenv("SIGNALCOPY_USE_GOLDEN_SCALP", "true").lower() in ("1", "true", "yes")
+            )
+
+            if is_golden_scalp:
+                # --- GOLDEN SCALP STAGE 1: Hit TP1 (1.5R) -> Realize 75% partial, Lock SL at +1.0R (Guaranteed Profit), Trail 25% runner ---
+                if idx == 0:
+                    pos["tp1_hit"] = True
+                    pos["tp1_hit_at"] = pos.get("tp1_hit_at") or datetime.now(UTC)
+                    pos["shadow_cohort"] = True
+                    self._record_shadow_tp(pos, 0, tp)
+                    initial_qty = float(pos["initial_qty"])
+                    target_remaining = initial_qty * 0.25
+                    cur_qty = float(pos.get("qty", 0.0))
+                    slice_qty = min(cur_qty, max(0.0, cur_qty - target_remaining))
+                    if slice_qty > 0:
+                        pos["qty"] = max(0.0, cur_qty - slice_qty)
+                        await self._realize_partial(pos, tp, slice_qty, "TP1_75PCT_GOLDEN")
+                    
+                    entry_p = float(pos["entry_price"])
+                    orig_sl = float(pos.get("provider_sl_original") or pos.get("sl_price") or entry_p)
+                    risk_per_unit = abs(entry_p - orig_sl)
+                    side = str(pos["side"]).upper()
+                    
+                    # Calculate actual R achieved at this TP
+                    r_achieved = (tp - entry_p) / risk_per_unit if side == "LONG" else (entry_p - tp) / risk_per_unit
+                    if r_achieved >= 1.25 and risk_per_unit > 0:
+                        lock_r = min(1.0, r_achieved - 0.25)
+                        lock_sl = entry_p + (lock_r * risk_per_unit) if side == "LONG" else entry_p - (lock_r * risk_per_unit)
+                        sl_kind = "LOCKED_PROFIT_1R"
+                    else:
+                        # If TP was reached at < 1.25R (e.g. provider TP1 at 0.8R), lock at BEP (+0.1% buffer)
+                        # so the stop is strictly behind current mark price and does NOT instantly self-stopout!
+                        bep_buf = entry_p * 0.001
+                        lock_sl = entry_p + bep_buf if side == "LONG" else entry_p - bep_buf
+                        sl_kind = "BREAKEVEN_BEP"
+
+                    cur_sl = float(pos.get("sl_price") or 0)
+                    if side == "LONG":
+                        pos["sl_price"] = max(cur_sl, lock_sl)
+                    else:
+                        pos["sl_price"] = min(cur_sl, lock_sl) if cur_sl > 0 else lock_sl
+                    
+                    pos["sl_kind"] = sl_kind
+                    pos["locked_profit"] = True
+                    pos["trail_active"] = True
+                    pos["next_tp_index"] = 1
+                    _persist_positions(self.positions)
+                    logger.info("[1.5R_GOLDEN_TP1] %s %s hit 1.5R (%.6g) -> Closed 75%% lot! SL locked to +1.0R (%.6g). 25%% runner trailing activated!",
+                                symbol, side, tp, pos["sl_price"])
+                    idx = 1
+                    continue
+
+                # --- GOLDEN SCALP STAGE 2: Hit TP2 (3.0R) -> Close remaining 25% runner ---
+                if idx == 1:
+                    pos["tp2_hit"] = True
+                    pos["tp2_hit_at"] = datetime.now(UTC)
+                    self._record_shadow_tp(pos, 1, tp)
+                    logger.info("[3.0R_GOLDEN_TP2] %s %s hit 3.0R (%.6g) -> Runner 25%% full target reached! Fully closing position.",
+                                symbol, side, tp)
+                    await self._close(symbol, tp, "TP2_RUNNER_FULL")
+                    return True
+            else:
+                # --- STANDARD SIGNAL COPY: Hit TP1 (1.0R) -> Move SL to BEP (Breakeven + 0.1% buffer) ---
+                if idx == 0:
+                    pos["tp1_hit"] = True
+                    pos["tp1_hit_at"] = pos.get("tp1_hit_at") or datetime.now(UTC)
+                    pos["shadow_cohort"] = True
+                    self._record_shadow_tp(pos, 0, tp)
+                    entry_p = float(pos["entry_price"])
+                    side = str(pos["side"]).upper()
+                    bep_sl = entry_p * 1.001 if side == "LONG" else entry_p * 0.999
+                    cur_sl = float(pos.get("sl_price") or 0)
+                    if side == "LONG":
+                        pos["sl_price"] = max(cur_sl, bep_sl)
+                    else:
+                        pos["sl_price"] = min(cur_sl, bep_sl) if cur_sl > 0 else bep_sl
+                    pos["sl_kind"] = "BREAKEVEN_1R"
+                    pos["next_tp_index"] = 1
+                    _persist_positions(self.positions)
+                    logger.info("[1R_REACHED_BEP] %s %s hit 1.0R (%.6g) -> SL moved to BEP (%.6g). 100%% lot retained (Risk-Free)!",
+                                symbol, side, tp, pos["sl_price"])
+                    idx = 1
+                    continue
+                
+                # --- STANDARD SIGNAL COPY: Hit TP2 (2.0R) -> Close 75% of initial position, activate Trailing Stop on 25% runner ---
+                if idx == 1:
+                    pos["tp2_hit"] = True
+                    pos["tp2_hit_at"] = datetime.now(UTC)
+                    self._record_shadow_tp(pos, 1, tp)
+                    initial_qty = float(pos["initial_qty"])
+                    target_remaining = initial_qty * 0.25
+                    cur_qty = float(pos.get("qty", 0.0))
+                    slice_qty = min(cur_qty, max(0.0, cur_qty - target_remaining))
+                    if slice_qty > 0:
+                        pos["qty"] = max(0.0, cur_qty - slice_qty)
+                        await self._realize_partial(pos, tp, slice_qty, "TP2_75PCT_PARTIAL")
+                    pos["next_tp_index"] = 2
+                    pos["locked_profit"] = True
+                    pos["trail_active"] = True
+                    pos["sl_kind"] = "TRAILING_RUNNER"
+                    _persist_positions(self.positions)
+                    logger.info("[2R_REACHED_TP2] %s %s hit 2.0R (%.6g) -> Closed 75%% lot! 25%% runner trailing activated.",
+                                symbol, side, tp)
+                    break
 
     async def _realize_partial(self, pos: Dict[str, Any], exit_price: float, qty: float, reason: str):
         entry, side = pos["entry_price"], pos["side"]

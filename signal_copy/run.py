@@ -243,6 +243,11 @@ async def main():
     channels = None
     if channels_env:
         channels = [int(c.strip()) for c in channels_env.split(",") if c.strip()]
+    
+    from signal_copy.orchestrator import RADAR_CHANNEL_IDS
+    if channels is not None:
+        channels = list(set(channels) | RADAR_CHANNEL_IDS)
+
     if channels:
         print(f"[SIGNAL COPY] Monitoring channels={channels}")
     else:

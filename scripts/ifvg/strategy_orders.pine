@@ -1,0 +1,326 @@
+
+// ══════════════════════════════════════════════════════════════════════
+// SECTION 13: STRATEGY ORDERS (strategy build only, see tools/build_strategy.py)
+// ══════════════════════════════════════════════════════════════════════
+// One position at a time, same open-stop model as the stats table.
+// RULE 1: Enter at the inversion close (process_orders_on_close) of a setup that meets
+//         "Min Grade (Stats & Strategy)", sized from entry to the IFVG box edge so a
+//         close beyond the box costs about the risk setting.
+// RULE 2: Exit order: TP limit + stop; the stop moves to entry once the BE level is reached.
+//         Stop Mode "Close beyond box": the stop order is the hard stop (the SL line) and
+//         RULE 3 does the rest. "Box edge (wick)": the stop order sits on the IFVG box edge,
+//         so a loss is about 1R.
+// RULE 3: Any candle closing beyond the IFVG box closes the trade at that close.
+// RULE 4: Flat by the day-end time (New York): an open trade is closed on the candle that
+//         closes at or after it, and no new trade opens until the 18:00 reopen (Lucid: 16:45).
+// RULE 5: Entry filters: HTF bias (read from the setup tag; neutral bias always passes)
+//         and the session the inversion candle belongs to (New York time).
+// NOTE: Futures size in whole contracts of the chart symbol. Run on the micro (MNQ1!)
+//       unless the risk covers a full contract; setups sized at 0 are skipped.
+// NOTE: Each entry's comment is the grade ("By signals" then groups by grade); each exit's
+//       comment is "reason | setup tag" (grade, sweep, delivery, scores, PD zone, LRLR,
+//       session, HTF bias) for the exported List of Trades.
+// ══════════════════════════════════════════════════════════════════════
+string GROUP_STRAT = "═══ Strategy ═══"
+i_strat_from = input.time(timestamp("2015-01-01T00:00:00"), "Trade From", group=GROUP_STRAT,
+     tooltip="Only open trades from this date. Use with Trade Until to test one period and confirm on another")
+i_strat_to   = input.time(timestamp("2099-12-31T00:00:00"), "Trade Until", group=GROUP_STRAT)
+i_flat_on    = input.bool(true, "Flat at Day End", group=GROUP_STRAT,
+     tooltip="Close any open trade at the Flat Time (New York) and open no new trade until the 18:00 reopen. Prop firms require it (Lucid: 16:45 ET)")
+i_flat_hhmm  = input.int(1645, "Flat Time (NY, HHMM)", minval=0, maxval=2359, group=GROUP_STRAT,
+     tooltip="24-hour New York time as HHMM, e.g. 1645 = 4:45 PM")
+i_stop_mode  = input.string("Close beyond box", "Stop Mode", options=["Close beyond box", "Box edge (wick)"], group=GROUP_STRAT,
+     tooltip="Close beyond box: exit when a candle closes beyond the IFVG box (a big candle can cost more than 1R). Box edge (wick): stop order on the box edge, so a loss is about 1R")
+i_bias_filter = input.string("All", "HTF Bias Filter", options=["All", "With bias", "Against bias"], group=GROUP_STRAT,
+     tooltip="Only trade setups with (or against) the HTF bias. Setups taken while the bias is neutral always pass")
+i_ss_asia    = input.bool(true, "Asia", inline="ss1", group=GROUP_STRAT,
+     tooltip="Sessions (New York time) the strategy may enter in: Asia 18:00-02:00, London 02:00-07:00, Pre-NY 07:00-09:30, NY AM 09:30-12:00, NY Lunch 12:00-13:30, NY PM 13:30-16:00, Close 16:00-18:00")
+i_ss_london  = input.bool(true, "London", inline="ss1", group=GROUP_STRAT)
+i_ss_preny   = input.bool(true, "Pre-NY", inline="ss1", group=GROUP_STRAT)
+i_ss_nyam    = input.bool(true, "NY AM", inline="ss2", group=GROUP_STRAT)
+i_ss_lunch   = input.bool(true, "NY Lunch", inline="ss2", group=GROUP_STRAT)
+i_ss_nypm    = input.bool(true, "NY PM", inline="ss2", group=GROUP_STRAT)
+i_ss_close   = input.bool(true, "Close", inline="ss2", group=GROUP_STRAT)
+i_show_breakdown = input.bool(true, "Show Breakdown Table", group=GROUP_STRAT,
+     tooltip="Strategy trades split by HTF bias (with / against), delivery (HTF FVG / same-TF FVG / none), liquidity sweep and LRLR, read from each trade's setup tag. Net P&L after commission")
+string GROUP_PROP = "═══ Prop Firm & Returns ═══"
+i_show_returns  = input.bool(true, "Show Monthly Returns Table", group=GROUP_PROP)
+i_prop_on       = input.bool(true, "Prop Firm Check", group=GROUP_PROP)
+i_prop_dd       = input.float(2000.0, "Max Drawdown (USD)", minval=1.0, step=100.0, group=GROUP_PROP)
+i_prop_dd_type  = input.string("Trailing EOD", "Drawdown Type", options=["Trailing EOD", "Trailing Intraday", "Static"], group=GROUP_PROP,
+     tooltip="Trailing EOD: limit follows the highest end-of-day balance (e.g. Topstep). Trailing Intraday: follows the highest balance during the day (e.g. Apex). Static: fixed below the starting balance")
+i_prop_lock     = input.bool(true, "Trailing Locks Above Start", group=GROUP_PROP,
+     tooltip="Once the trailing limit reaches the starting balance + Lock Offset it stays there (Lucid: $50,100 on 50K)")
+i_prop_lock_off = input.float(100.0, "Lock Offset (USD)", minval=0.0, step=50.0, group=GROUP_PROP)
+i_prop_daily    = input.float(0.0, "Daily Loss Limit (USD, 0 = off)", minval=0.0, step=100.0, group=GROUP_PROP)
+i_prop_target   = input.float(3000.0, "Profit Target (USD, 0 = off)", minval=0.0, step=100.0, group=GROUP_PROP)
+i_prop_consist  = input.float(50.0, "Consistency: Best Day Max % of Profit (0 = off)", minval=0.0, maxval=100.0, step=5.0, group=GROUP_PROP,
+     tooltip="Evaluation passes only when the best day's profit is at most this % of the total profit (Lucid Flex: 50%). Until then trading continues")
+i_max_qty       = input.int(40, "Max Contracts (0 = no cap)", minval=0, group=GROUP_PROP,
+     tooltip="Caps the position size (Lucid Flex 50K: 4 minis or 40 micros)")
+
+// Position size in the chart symbol's units for the risk setting (0 = can't size)
+strategy_qty(float entry, float stop_px) =>
+    float per_unit = math.abs(entry - stop_px) * syminfo.pointvalue * g_fx
+    float qty = 0.0
+    if per_unit > 0
+        float raw = risk_budget() / per_unit
+        qty := (syminfo.type == "crypto" or syminfo.type == "cfd") ? math.floor(raw * 1000.0) / 1000.0 : math.floor(raw)
+    qty
+
+// Value of `key` in a setup tag "A|sw=1|...|bi=with" ("" when missing)
+tag_value(string tag, string key) =>
+    string result = ""
+    int p = str.pos(tag, "|" + key + "=")
+    if not na(p)
+        string rest = str.substring(tag, p + str.length(key) + 2)
+        int e = str.pos(rest, "|")
+        result := na(e) ? rest : str.substring(rest, 0, e)
+    result
+
+// RULE 5: entry filters on the setup's HTF bias and the current session
+strategy_filters_ok(Trade t) =>
+    string bi = tag_value(t.tag, "bi")
+    bool bias_ok = i_bias_filter == "All" or bi == "neutral" or (i_bias_filter == "With bias" and bi == "with") or (i_bias_filter == "Against bias" and bi == "against")
+    string ss = session_name()
+    bool sess_ok = (ss == "Asia" and i_ss_asia) or (ss == "London" and i_ss_london) or (ss == "Pre-NY" and i_ss_preny) or (ss == "NY AM" and i_ss_nyam) or (ss == "NY Lunch" and i_ss_lunch) or (ss == "NY PM" and i_ss_nypm) or (ss == "Close" and i_ss_close)
+    bias_ok and sess_ok
+
+// Exit comment "reason | setup tag": the entry carries only the grade so the Strategy
+// Tester's "By signals" panel groups by grade; the full tag stays in the export here
+string EXIT_SEP = " | "
+strategy_exit_comment(string reason, Trade t) =>
+    na(t) ? reason : reason + EXIT_SEP + t.tag
+
+// Stop order price: entry once at BE, else the box edge or the hard stop (na = none)
+strategy_stop(Trade t) =>
+    t.be_moved ? t.entry : (i_stop_mode == "Box edge (wick)" ? t.stop_px : t.sl)
+
+var Trade g_strat_trade = na
+bool strat_in_window = time >= i_strat_from and time <= i_strat_to
+// RULE 4: day-end flat window, from the flat time to the 18:00 New York reopen
+int strat_close_min = hour(time_close, "America/New_York") * 60 + minute(time_close, "America/New_York")
+bool strat_flat_window = i_flat_on and strat_close_min >= int(i_flat_hhmm / 100) * 60 + i_flat_hhmm % 100 and strat_close_min < 18 * 60
+if i_show_indicator and barstate.isconfirmed
+    // Manage the open trade
+    if strategy.position_size != 0 and strat_flat_window
+        strategy.close_all(comment=strategy_exit_comment("day end", g_strat_trade))
+    else if strategy.position_size != 0 and not na(g_strat_trade)
+        Trade st = g_strat_trade
+        if st.result == 2
+            strategy.close("IFVG", comment=strategy_exit_comment("close beyond box", st))
+        else
+            strategy.exit("Exit", "IFVG", stop=strategy_stop(st), limit=st.tp, comment_loss=strategy_exit_comment(st.be_moved ? "BE" : (i_stop_mode == "Box edge (wick)" ? "box edge" : "hard stop"), st), comment_profit=strategy_exit_comment("TP", st))
+    if strategy.position_size == 0
+        g_strat_trade := na
+    // New entry on the setup formed this candle
+    int strat_n = array.size(g_ifvg_array)
+    if strategy.position_size == 0 and strat_in_window and not strat_flat_window and strat_n > 0
+        IFVG sf = array.get(g_ifvg_array, strat_n - 1)
+        if sf.inversion_bar == bar_index and not na(sf.trade) and grade_meets_minimum(sf.grade, i_stats_min_grade) and strategy_filters_ok(sf.trade)
+            Trade nt = sf.trade
+            float q = i_max_qty > 0 ? math.min(strategy_qty(nt.entry, nt.stop_px), i_max_qty) : strategy_qty(nt.entry, nt.stop_px)
+            if q > 0
+                strategy.entry("IFVG", nt.is_bull ? strategy.long : strategy.short, qty=q, comment=nt.grade)
+                strategy.exit("Exit", "IFVG", stop=strategy_stop(nt), limit=nt.tp, comment_loss=strategy_exit_comment(i_stop_mode == "Box edge (wick)" ? "box edge" : "hard stop", nt), comment_profit=strategy_exit_comment("TP", nt))
+                g_strat_trade := nt
+
+// ══════════════════════════════════════════════════════════════════════
+// SECTION 14: MONTHLY RETURNS, STREAKS & PROP FIRM CHECK (strategy build only)
+// ══════════════════════════════════════════════════════════════════════
+// Monthly returns: net P&L (after commission) of trades closed in each month, New York time.
+// Streaks: losses / wins in a row; breakeven exits neither extend nor break a streak.
+// Prop firm check: back-to-back evaluations on the strategy's equity.
+// Defaults = Lucid Flex 50K: $3,000 target, $2,000 EOD trailing max loss locking at
+// start + $100, no daily limit, 50% consistency, max 40 micros.
+// RULE 1: An evaluation fails when equity (open trade included, at candle close) falls to
+//         the drawdown limit, or the day's loss reaches the daily loss limit.
+// RULE 2: It passes when closed profit reaches the profit target and the best day's
+//         closed profit is at most the consistency % of the evaluation's profit.
+// RULE 3: After a pass or fail the next evaluation starts from the current equity.
+// Drawdown limit: Static = start - max drawdown. Trailing = highest equity - max drawdown
+// (Trailing EOD: highest end-of-day equity; Intraday: highest candle-close equity),
+// and it stops rising at the starting balance when "Stops at Starting Balance" is on.
+// NOTE: Intraday trailing uses candle closes, not every tick, so it is slightly optimistic.
+// ══════════════════════════════════════════════════════════════════════
+
+// "+1.2k" / "-350"
+fmt_k(float v) =>
+    string sign = v >= 0 ? "+" : "-"
+    float a = math.abs(v)
+    a >= 1000 ? sign + str.tostring(a / 1000.0, "0.0") + "k" : sign + str.tostring(a, "0")
+
+var map<int, float> g_month_pnl = map.new<int, float>()   // key = year * 100 + month
+var int g_closed_seen = 0
+var int g_loss_run = 0
+var int g_loss_max = 0
+var int g_win_run = 0
+var int g_win_max = 0
+var float p_base = na        // Equity at the start of the current evaluation
+var float p_peak = na        // Highest equity used for the trailing limit
+var float p_day_start = na   // Equity at the start of the trading day
+var float p_last_eq = na     // Previous candle's equity
+var int p_start_time = na
+var int p_pass = 0
+var int p_fail = 0
+var float p_pass_days = 0.0
+var int p_first_fail = na
+var float p_day_start_closed = na  // Closed balance at the start of the trading day
+var float p_last_closed = na
+var float p_best_day = 0.0         // Best day's closed profit in the current evaluation
+bool strat_new_day = ta.change(time("D")) != 0
+
+// Breakdown rows: 0 all · 1-3 HTF bias with/against/neutral · 4-6 delivery HTF/TF/none
+// · 7-8 sweep yes/no · 9-10 LRLR yes/no. Per row: trades, wins, gross profit, gross loss.
+int BD_ROWS = 11
+var array<int> g_bd_n = array.new<int>(BD_ROWS, 0)
+var array<int> g_bd_w = array.new<int>(BD_ROWS, 0)
+var array<float> g_bd_gp = array.new<float>(BD_ROWS, 0.0)
+var array<float> g_bd_gl = array.new<float>(BD_ROWS, 0.0)
+
+bd_add(int row, float pnl) =>
+    array.set(g_bd_n, row, array.get(g_bd_n, row) + 1)
+    if pnl > 0
+        array.set(g_bd_w, row, array.get(g_bd_w, row) + 1)
+        array.set(g_bd_gp, row, array.get(g_bd_gp, row) + pnl)
+    else
+        array.set(g_bd_gl, row, array.get(g_bd_gl, row) - pnl)
+
+if i_show_indicator and barstate.isconfirmed
+    // Closed trades → monthly P&L and streaks
+    if strategy.closedtrades > g_closed_seen
+        for ci = g_closed_seen to strategy.closedtrades - 1
+            float pnl = strategy.closedtrades.profit(ci)
+            int xt = strategy.closedtrades.exit_time(ci)
+            int mkey = year(xt, "America/New_York") * 100 + month(xt, "America/New_York")
+            g_month_pnl.put(mkey, nz(g_month_pnl.get(mkey)) + pnl)
+            string cexit = strategy.closedtrades.exit_comment(ci)
+            int csep = str.pos(cexit, EXIT_SEP)
+            string ctag = na(csep) ? "" : str.substring(cexit, csep + str.length(EXIT_SEP))
+            string creason = na(csep) ? cexit : str.substring(cexit, 0, csep)
+            string c_bi = tag_value(ctag, "bi")
+            string c_dl = tag_value(ctag, "dl")
+            string c_sw = tag_value(ctag, "sw")
+            bd_add(0, pnl)
+            bd_add(c_bi == "with" ? 1 : c_bi == "against" ? 2 : 3, pnl)
+            bd_add(c_dl == "HTF" ? 4 : c_dl == "TF" ? 5 : 6, pnl)
+            bd_add(c_sw == "1" or c_sw == "2" ? 7 : 8, pnl)
+            bd_add(tag_value(ctag, "lr") == "1" ? 9 : 10, pnl)
+            if creason != "BE"
+                if pnl < 0
+                    g_loss_run += 1
+                    g_win_run := 0
+                    g_loss_max := int(math.max(g_loss_max, g_loss_run))
+                else
+                    g_win_run += 1
+                    g_loss_run := 0
+                    g_win_max := int(math.max(g_win_max, g_win_run))
+        g_closed_seen := strategy.closedtrades
+    // Prop firm evaluations
+    if i_prop_on
+        float eq = strategy.equity
+        float closed_bal = strategy.initial_capital + strategy.netprofit
+        if na(p_base)
+            p_base := eq
+            p_peak := eq
+            p_day_start := eq
+            p_last_eq := eq
+            p_start_time := time
+            p_day_start_closed := closed_bal
+            p_last_closed := closed_bal
+        if strat_new_day
+            p_best_day := math.max(p_best_day, p_last_closed - p_day_start_closed)
+            p_day_start_closed := p_last_closed
+            p_day_start := p_last_eq
+            if i_prop_dd_type == "Trailing EOD"
+                p_peak := math.max(p_peak, p_last_eq)
+        if i_prop_dd_type == "Trailing Intraday"
+            p_peak := math.max(p_peak, eq)
+        float limit = i_prop_dd_type == "Static" ? p_base - i_prop_dd : (i_prop_lock ? math.min(p_peak - i_prop_dd, p_base + i_prop_lock_off) : p_peak - i_prop_dd)
+        bool failed = eq <= limit or (i_prop_daily > 0 and eq - p_day_start <= -i_prop_daily)
+        float eval_profit = closed_bal - p_base
+        float best_day = math.max(p_best_day, closed_bal - p_day_start_closed)
+        bool consistent = i_prop_consist <= 0 or best_day <= eval_profit * i_prop_consist / 100.0
+        bool passed = not failed and i_prop_target > 0 and eval_profit >= i_prop_target and consistent
+        if failed or passed
+            if failed
+                if na(p_first_fail)
+                    p_first_fail := time
+                p_fail += 1
+            else
+                p_pass_days += (time - p_start_time) / 86400000.0
+                p_pass += 1
+            p_base := eq
+            p_peak := eq
+            p_day_start := eq
+            p_start_time := time
+            p_day_start_closed := closed_bal
+            p_best_day := 0.0
+        p_last_eq := eq
+        p_last_closed := closed_bal
+
+// Table: one row per year (last 15), a column per month, the year's total, then streaks and prop results
+var table g_ret_table = table.new(position.bottom_left, 14, 20, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
+if barstate.islast
+    table.clear(g_ret_table, 0, 0, 13, 19)
+    if i_show_returns
+        array<string> mnames = array.from("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+        table.cell(g_ret_table, 0, 0, "Year", text_color=color.gray, text_size=size.tiny)
+        for mi = 0 to 11
+            table.cell(g_ret_table, mi + 1, 0, array.get(mnames, mi), text_color=color.gray, text_size=size.tiny)
+        table.cell(g_ret_table, 13, 0, "Total", text_color=color.gray, text_size=size.tiny)
+        array<int> years = array.new<int>()
+        for k in g_month_pnl.keys()
+            int ky = int(math.floor(k / 100))
+            if not array.includes(years, ky)
+                array.push(years, ky)
+        array.sort(years, order.ascending)
+        int ny = array.size(years)
+        int first_y = int(math.max(0, ny - 15))
+        int row = 1
+        if ny > 0
+            for yi = first_y to ny - 1
+                int yr = array.get(years, yi)
+                float ytot = 0.0
+                table.cell(g_ret_table, 0, row, str.tostring(yr), text_color=color.white, text_size=size.tiny)
+                for mi = 1 to 12
+                    float mv = g_month_pnl.get(yr * 100 + mi)
+                    if not na(mv)
+                        ytot += mv
+                        table.cell(g_ret_table, mi, row, fmt_k(mv), text_color=(mv >= 0 ? i_bullish_color : i_bearish_color), text_size=size.tiny)
+                table.cell(g_ret_table, 13, row, fmt_k(ytot), text_color=(ytot >= 0 ? i_bullish_color : i_bearish_color), text_size=size.tiny)
+                row += 1
+        string streak_txt = "Max losses in a row: " + str.tostring(g_loss_max) + " · Max wins in a row: " + str.tostring(g_win_max) + " (BE exits not counted)"
+        table.cell(g_ret_table, 0, row, streak_txt, text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
+        table.merge_cells(g_ret_table, 0, row, 13, row)
+        row += 1
+        if i_prop_on
+            string rule_txt = "Prop: " + i_prop_dd_type + " $" + str.tostring(i_prop_dd, "#,##0") + (i_prop_daily > 0 ? " · daily $" + str.tostring(i_prop_daily, "#,##0") : "") + (i_prop_target > 0 ? " · target $" + str.tostring(i_prop_target, "#,##0") : "") + (i_prop_consist > 0 ? " · consistency " + str.tostring(i_prop_consist, "0") + "%" : "") + (i_max_qty > 0 ? " · max " + str.tostring(i_max_qty) + " contracts" : "")
+            string res_txt = "Passed " + str.tostring(p_pass) + " · Failed " + str.tostring(p_fail) + (p_pass > 0 ? " · avg " + str.tostring(p_pass_days / p_pass, "0") + " days to pass" : "") + " · first fail: " + (na(p_first_fail) ? "never" : str.format_time(p_first_fail, "yyyy-MM-dd", "America/New_York"))
+            table.cell(g_ret_table, 0, row, rule_txt, text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
+            table.merge_cells(g_ret_table, 0, row, 13, row)
+            row += 1
+            table.cell(g_ret_table, 0, row, res_txt, text_color=(p_fail == 0 ? i_bullish_color : color.white), text_size=size.tiny, text_halign=text.align_left)
+            table.merge_cells(g_ret_table, 0, row, 13, row)
+
+// Breakdown table: strategy trades by HTF bias, delivery, sweep and LRLR (top center)
+var table g_bd_table = table.new(position.top_center, 6, BD_ROWS + 1, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
+if barstate.islast
+    table.clear(g_bd_table, 0, 0, 5, BD_ROWS)
+    if i_show_breakdown
+        array<string> heads = array.from("Trades by", "Trades", "Win %", "PF", "Net", "Avg")
+        for hc = 0 to 5
+            table.cell(g_bd_table, hc, 0, array.get(heads, hc), text_color=color.gray, text_size=size.tiny)
+        array<string> names = array.from("All trades", "HTF bias: with", "HTF bias: against", "HTF bias: neutral", "Delivery: HTF FVG", "Delivery: same-TF FVG", "Delivery: none", "Sweep: yes", "Sweep: no", "LRLR in path: yes", "LRLR in path: no")
+        for r = 0 to BD_ROWS - 1
+            int n = array.get(g_bd_n, r)
+            float gp = array.get(g_bd_gp, r)
+            float gl = array.get(g_bd_gl, r)
+            float net = gp - gl
+            color nc = n == 0 ? color.gray : (net >= 0 ? i_bullish_color : i_bearish_color)
+            table.cell(g_bd_table, 0, r + 1, array.get(names, r), text_color=(r == 0 ? color.white : color.silver), text_size=size.tiny, text_halign=text.align_left)
+            table.cell(g_bd_table, 1, r + 1, str.tostring(n), text_color=color.white, text_size=size.tiny)
+            table.cell(g_bd_table, 2, r + 1, n > 0 ? str.tostring(array.get(g_bd_w, r) * 100.0 / n, "0") + "%" : "-", text_color=color.white, text_size=size.tiny)
+            table.cell(g_bd_table, 3, r + 1, gl > 0 ? str.tostring(gp / gl, "0.00") : (gp > 0 ? "∞" : "-"), text_color=color.white, text_size=size.tiny)
+            table.cell(g_bd_table, 4, r + 1, n > 0 ? fmt_k(net) : "-", text_color=nc, text_size=size.tiny)
+            table.cell(g_bd_table, 5, r + 1, n > 0 ? fmt_k(net / n) : "-", text_color=nc, text_size=size.tiny)

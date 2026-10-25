@@ -1,122 +1,16 @@
-# SignalCopy Real Money — clean minimal stack
-# Services: TimescaleDB + FastAPI + Collectors + OI rollup + Scanner + Gateway + SignalCopy
-# No paper bots, no legacy engines, no profiles needed.
-
 services:
-  timescaledb:
-    image: timescale/timescaledb:latest-pg16
-    container_name: nexus_timescaledb
-    environment:
-      POSTGRES_DB: nexus
-      POSTGRES_USER: nexus
-      POSTGRES_PASSWORD: ${NEXUS_DB_PASSWORD:?NEXUS_DB_PASSWORD is required}
-    ports:
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - timescale_data:/var/lib/postgresql/data
-      - ./docker/timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    networks: [signalnet]
-
-  fastapi:
-    build:
-      context: .
-      dockerfile: docker/fastapi/Dockerfile
-    container_name: nexus_fastapi
-    environment:
-      DATABASE_URL: postgresql://nexus:${NEXUS_DB_PASSWORD:?NEXUS_DB_PASSWORD is required}@timescaledb:5432/nexus
-    ports:
-      - "127.0.0.1:8000:8000"
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks: [signalnet]
-
-  binance_collector:
-    build:
-      context: .
-      dockerfile: docker/collector/Dockerfile
-    container_name: nexus_binance_collector
-    environment:
-      DATABASE_URL: postgresql://nexus:${NEXUS_DB_PASSWORD:?NEXUS_DB_PASSWORD is required}@timescaledb:5432/nexus
-      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
-      BINANCE_SECRET: ${BINANCE_SECRET:-}
-      COLLECTOR_MODE: binance
-      UNIVERSE_FILE: /app/runtime/revo/binance_top100.txt
-      KLINE_LIMIT: "3"
-    volumes:
-      - ./runtime/revo:/app/runtime/revo:ro
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks: [signalnet]
-
-  bybit_collector:
-    build:
-      context: .
-      dockerfile: docker/collector/Dockerfile
-    container_name: nexus_bybit_collector
-    environment:
-      DATABASE_URL: postgresql://nexus:${NEXUS_DB_PASSWORD:?NEXUS_DB_PASSWORD is required}@timescaledb:5432/nexus
-      BYBIT_API_KEY: ${BYBIT_API_KEY:-}
-      BYBIT_SECRET: ${BYBIT_SECRET:-}
-      COLLECTOR_MODE: bybit
-      UNIVERSE_FILE: /app/runtime/revo/bybit_all_691.txt
-    volumes:
-      - ./runtime/revo:/app/runtime/revo:ro
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks: [signalnet]
-
   oi_rollup:
-    build:
-      context: .
-      dockerfile: docker/collector/Dockerfile
+    image: signalcopyreal-oi_rollup:latest
     container_name: nexus_oi_rollup
     command: ["python", "-u", "-m", "collector"]
     environment:
       DATABASE_URL: postgresql://nexus:${NEXUS_DB_PASSWORD:?NEXUS_DB_PASSWORD is required}@timescaledb:5432/nexus
       COLLECTOR_MODE: oi_rollup
-    depends_on:
-      timescaledb:
-        condition: service_healthy
     restart: unless-stopped
-    networks: [signalnet]
-
-  nexus_scanner:
-    build:
-      context: .
-      dockerfile: docker/bot/Dockerfile
-    image: nexus-bot:latest
-    container_name: nexus_scanner
-    command: ["python", "-u", "bots/nexus_scanner.py"]
-    environment:
-      NEXUS_API_URL: http://fastapi:8000
-      REVO_RUNTIME_DIR: /runtime/revo
-      REVO_TOP_N: ${REVO_TOP_N:-347}
-      REVO_MIN_VOLUME: ${REVO_MIN_VOLUME:-600000}
-      REVO_SCANNER_INTERVAL: ${REVO_SCANNER_INTERVAL:-300}
-    volumes:
-      - ./runtime/revo:/runtime/revo
-    depends_on:
-      fastapi:
-        condition: service_started
-    restart: unless-stopped
-    networks: [signalnet]
+    networks:
+      - docker_default
 
   gateway:
-    build:
-      context: .
-      dockerfile: docker/bot/Dockerfile
     image: nexus-bot:latest
     container_name: nexus_gateway
     env_file:
@@ -127,61 +21,32 @@ services:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:?GATEWAY_TOKEN is required}
-      GATEWAY_TRADER_MODE: ${GATEWAY_TRADER_MODE:-paper}
+      GATEWAY_TRADER_MODE: ${GATEWAY_TRADER_MODE:-bybit}
       GATEWAY_PAPER_MAINNET: ${GATEWAY_PAPER_MAINNET:-false}
       BYBIT_API_KEY: ${BYBIT_API_KEY:?BYBIT_API_KEY is required}
       BYBIT_SECRET: ${BYBIT_SECRET:?BYBIT_SECRET is required}
       PAPER_NEXUS_API: http://fastapi:8000
       BOT_JOURNAL_DIR: /app/journal
-      JOURNAL_PATH: /app/journal
       FQ_PAPER_POSITION_STATE: /app/journal/open_positions.json
       FQ_PAPER_EQUITY_STATE: /app/journal/paper_equity.json
-      # Capital / risk
       SIGNALCOPY_CAPITAL: ${SIGNALCOPY_CAPITAL:-100}
       SIGNALCOPY_RISK_PER_TRADE_USD: ${SIGNALCOPY_RISK_PER_TRADE_USD:-2}
       SIGNALCOPY_MAX_LEVERAGE: ${SIGNALCOPY_MAX_LEVERAGE:-10}
       SIGNALCOPY_MAX_CONCURRENT: ${SIGNALCOPY_MAX_CONCURRENT:-10}
-      MAX_OPEN_POS_GLOBAL: ${MAX_OPEN_POS_GLOBAL:-20}
       REAL_MAX_RUNNING_POSITIONS: ${REAL_MAX_RUNNING_POSITIONS:-20}
-      MAX_GLOBAL_OPEN_RISK_PCT: ${MAX_GLOBAL_OPEN_RISK_PCT:-0.10}
-      MAX_TOTAL_EXPOSURE_PCT: ${MAX_TOTAL_EXPOSURE_PCT:-100000.0}
       MAX_SAME_DIRECTION_POS: ${MAX_SAME_DIRECTION_POS:-0}
-      STARTING_BALANCE: ${STARTING_BALANCE:-1000}
-      MAX_DAILY_LOSS_PCT: ${MAX_DAILY_LOSS_PCT:-15.0}
-      BYBIT_DAILY_LOSS_LIMIT_USD: ${BYBIT_DAILY_LOSS_LIMIT_USD:-12}
-      # Dynamic exit layers
+      MAX_TOTAL_EXPOSURE_PCT: ${MAX_TOTAL_EXPOSURE_PCT:-100000.0}
+      MAX_GLOBAL_OPEN_RISK_PCT: ${MAX_GLOBAL_OPEN_RISK_PCT:-0.10}
       SIGNALCOPY_BYBIT_DYNAMIC_EXIT: ${SIGNALCOPY_BYBIT_DYNAMIC_EXIT:-true}
       SCRATCH_EXIT_ENABLED: ${SCRATCH_EXIT_ENABLED:-true}
+      SCRATCH_EXIT_RANGING_MINUTES: ${SCRATCH_EXIT_RANGING_MINUTES:-30}
+      SCRATCH_EXIT_TRENDING_MINUTES: ${SCRATCH_EXIT_TRENDING_MINUTES:-45}
       SCRATCH_EXIT_MAX_ABS_PNL_PCT: ${SCRATCH_EXIT_MAX_ABS_PNL_PCT:-0.4}
-      SCRATCH_EXIT_PROGRESS_R_THRESHOLD: ${SCRATCH_EXIT_PROGRESS_R_THRESHOLD:-0.35}
-      SCRATCH_EXIT_WEAK_PROGRESS_R_THRESHOLD: ${SCRATCH_EXIT_WEAK_PROGRESS_R_THRESHOLD:-0.6}
-      SCRATCH_EXIT_WEAK_TIMEOUT_MIN: ${SCRATCH_EXIT_WEAK_TIMEOUT_MIN:-45}
-      SCRATCH_EXIT_WEAK_MIN_REASONS: ${SCRATCH_EXIT_WEAK_MIN_REASONS:-2}
-      SCRATCH_EXIT_LOW_TP_PROGRESS_FRACTION: ${SCRATCH_EXIT_LOW_TP_PROGRESS_FRACTION:-0.25}
-      SCRATCH_EXIT_STRONG_TIMEOUT_MULT: ${SCRATCH_EXIT_STRONG_TIMEOUT_MULT:-1.5}
-      SCRATCH_EXIT_NEAR_TP_PROGRESS_FRACTION: ${SCRATCH_EXIT_NEAR_TP_PROGRESS_FRACTION:-0.75}
-      SCRATCH_EXIT_AUDIT_JOURNAL: ${SCRATCH_EXIT_AUDIT_JOURNAL:-/app/journal/scratch_exit_audit.jsonl}
-      GATEWAY_ENRICH_MANUAL_SIGNALS: ${GATEWAY_ENRICH_MANUAL_SIGNALS:-true}
-      GATEWAY_NORMALIZE_MANUAL_TPS: ${GATEWAY_NORMALIZE_MANUAL_TPS:-true}
-      BYBIT_ENRICH_IMPORTED_POSITIONS: ${BYBIT_ENRICH_IMPORTED_POSITIONS:-true}
-      MANUAL_SIGNAL_TIMEFRAME: ${MANUAL_SIGNAL_TIMEFRAME:-15m}
-      MANUAL_DEFAULT_FINAL_R: ${MANUAL_DEFAULT_FINAL_R:-2.0}
-      MANUAL_DEFAULT_SETUP_TYPE: ${MANUAL_DEFAULT_SETUP_TYPE:-EARLY_ENTRY}
-      MANUAL_EARLY_SCRATCH_MIN_R: ${MANUAL_EARLY_SCRATCH_MIN_R:--0.5}
-      MANUAL_EARLY_HARD_EXIT_R: ${MANUAL_EARLY_HARD_EXIT_R:--0.75}
-      MANUAL_EARLY_TIMEOUT_MULT: ${MANUAL_EARLY_TIMEOUT_MULT:-3.0}
-      MANUAL_EARLY_MIN_TIMEOUT_MIN: ${MANUAL_EARLY_MIN_TIMEOUT_MIN:-135}
-      MANUAL_SWING_MIN_TIMEOUT_MIN: ${MANUAL_SWING_MIN_TIMEOUT_MIN:-360}
-      MANUAL_EARLY_MAX_TIMEOUT_MIN: ${MANUAL_EARLY_MAX_TIMEOUT_MIN:-720}
-      MANUAL_EARLY_MAX_HOLD_MULT: ${MANUAL_EARLY_MAX_HOLD_MULT:-2.0}
-      SMART_SCRATCH_ENABLED: ${SMART_SCRATCH_ENABLED:-true}
-      SMART_SCRATCH_PHASE1_4H_ONLY: ${SMART_SCRATCH_PHASE1_4H_ONLY:-false}
       DAMAGE_REDUCER_ENABLED: ${DAMAGE_REDUCER_ENABLED:-true}
       DAMAGE_REDUCER_MIN_HOLD_MINUTES: ${DAMAGE_REDUCER_MIN_HOLD_MINUTES:-45}
       DAMAGE_REDUCER_MAX_LOSS_PCT: ${DAMAGE_REDUCER_MAX_LOSS_PCT:--2.5}
-      DAMAGE_REDUCER_MIN_ADVERSE_R: ${DAMAGE_REDUCER_MIN_ADVERSE_R:--0.45}
-      DAMAGE_REDUCER_HARD_R: ${DAMAGE_REDUCER_HARD_R:--0.85}
-      DAMAGE_REDUCER_EMERGENCY_R: ${DAMAGE_REDUCER_EMERGENCY_R:--1.10}
+      DAMAGE_REDUCER_PROFIT_GUARD_ENABLED: ${DAMAGE_REDUCER_PROFIT_GUARD_ENABLED:-true}
+      DAMAGE_REDUCER_PROFIT_GUARD_MIN_R: ${DAMAGE_REDUCER_PROFIT_GUARD_MIN_R:-0.30}
       DAMAGE_REDUCER_MIN_REVERSAL_SIGNALS: ${DAMAGE_REDUCER_MIN_REVERSAL_SIGNALS:-2}
       DAMAGE_REVERSAL_FIRST_MIN_R: ${DAMAGE_REVERSAL_FIRST_MIN_R:--0.20}
       DAMAGE_REVERSAL_FIRST_SIGNALS: ${DAMAGE_REVERSAL_FIRST_SIGNALS:-3}
@@ -203,7 +68,6 @@ services:
       TRAILING_EXECUTION_ENABLED: "true"
       SHADOW_TRAILING_ENABLED: ${SHADOW_TRAILING_ENABLED:-true}
       SHADOW_TRAILING_JOURNAL: /app/journal/shadow_trailing.jsonl
-      # Notifications
       SIGNAL_COPY_TRADES_NOTIFY_BOT_TOKEN: ${SIGNAL_COPY_TRADES_NOTIFY_BOT_TOKEN:-}
       SIGNAL_COPY_TRADES_NOTIFY_CHAT_ID: ${SIGNAL_COPY_TRADES_NOTIFY_CHAT_ID:-0}
       SIGNAL_COPY_PARSER_NOTIFY_BOT_TOKEN: ${SIGNAL_COPY_PARSER_NOTIFY_BOT_TOKEN:-}
@@ -211,19 +75,18 @@ services:
     ports:
       - "127.0.0.1:8787:8787"
     volumes:
+      - ./risk:/app/risk
       - ./journal:/app/journal
+      - ./execution:/app/execution
+      - ./gateway:/app/gateway
       - ./runtime/whales:/app/runtime/whales:ro
       - ./runtime/revo:/app/runtime/revo:ro
-    depends_on:
-      fastapi:
-        condition: service_started
     restart: unless-stopped
-    networks: [signalnet]
+    networks:
+      - docker_default
 
   signal_copy:
-    build:
-      context: .
-      dockerfile: docker/signal_copy/Dockerfile
+    image: signalcopyreal-signal_copy:latest
     container_name: nexus_signal_copy
     env_file:
       - .env
@@ -232,7 +95,6 @@ services:
       NEXUS_API_URL: http://fastapi:8000
       LOG_DIR: /tmp
       MPLCONFIGDIR: /tmp/matplotlib
-      # Telegram listener
       SIGNAL_COPY_TG_API_ID: ${TELEGRAM_API_ID:?TELEGRAM_API_ID is required}
       SIGNAL_COPY_TG_API_HASH: ${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is required}
       SIGNAL_COPY_TG_SESSION: ${TELEGRAM_SESSION_NAME:-/state/signal_copy_session}
@@ -245,14 +107,12 @@ services:
       SIGNAL_COPY_EXPIRY_SCALP: ${SIGNAL_COPY_EXPIRY_SCALP:-2700}
       SIGNAL_COPY_EXPIRY_STANDARD: ${SIGNAL_COPY_EXPIRY_STANDARD:-10800}
       SIGNAL_COPY_EXPIRY_SWING: ${SIGNAL_COPY_EXPIRY_SWING:-64800}
-      # Notifications
       SIGNAL_COPY_PARSER_NOTIFY_BOT_TOKEN: ${SIGNAL_COPY_PARSER_NOTIFY_BOT_TOKEN}
       SIGNAL_COPY_PARSER_NOTIFY_CHAT_ID: ${SIGNAL_COPY_PARSER_NOTIFY_CHAT_ID}
       SIGNAL_COPY_TRADES_NOTIFY_BOT_TOKEN: ${SIGNAL_COPY_TRADES_NOTIFY_BOT_TOKEN}
       SIGNAL_COPY_TRADES_NOTIFY_CHAT_ID: ${SIGNAL_COPY_TRADES_NOTIFY_CHAT_ID}
       SIGNAL_COPY_CONFIRM_BOT_TOKEN: ${SIGNAL_COPY_CONFIRM_BOT_TOKEN:-}
       SIGNAL_COPY_CONFIRM_CHAT_ID: ${SIGNAL_COPY_CONFIRM_CHAT_ID:-}
-      # Behaviour — real money
       SIGNAL_COPY_RISK_PCT: ${SIGNAL_COPY_RISK_PCT:-0.01}
       SIGNAL_COPY_DRY_RUN: ${SIGNAL_COPY_DRY_RUN:-true}
       SIGNAL_COPY_AUTO_EXECUTE: ${SIGNAL_COPY_AUTO_EXECUTE:-false}
@@ -278,7 +138,6 @@ services:
       SIGNAL_COPY_PARSE_REPORT: ${SIGNAL_COPY_PARSE_REPORT:-false}
       SIGNAL_COPY_NOTIFY_REJECTED: ${SIGNAL_COPY_NOTIFY_REJECTED:-true}
       SIGNAL_COPY_NOTIFY_WEAK: ${SIGNAL_COPY_NOTIFY_WEAK:-true}
-      # Adversarial (advisory by default)
       SIGNAL_COPY_ADVERSARIAL_ENABLED: ${SIGNAL_COPY_ADVERSARIAL_ENABLED:-true}
       SIGNAL_COPY_ADVERSARIAL_MODE: ${SIGNAL_COPY_ADVERSARIAL_MODE:-off}
       SIGNAL_COPY_COMMITTEE_ENABLED: ${SIGNAL_COPY_COMMITTEE_ENABLED:-false}
@@ -292,14 +151,12 @@ services:
       ADVERSARIAL_MODEL: ${ADVERSARIAL_MODEL:-Free-Tiers}
       ADVERSARIAL_MODEL_FALLBACK: ${ADVERSARIAL_MODEL_FALLBACK:-Free-Tiers}
       ADV_LLM_TIMEOUT_SEC: ${ADV_LLM_TIMEOUT_SEC:-25}
-      # Vision (optional)
       SIGNAL_COPY_VISION_ENABLED: ${SIGNAL_COPY_VISION_ENABLED:-false}
       SIGNAL_COPY_VISION_BACKEND: ${SIGNAL_COPY_VISION_BACKEND:-openai}
       SIGNAL_COPY_VISION_OPENAI_BASE_URL: ${SIGNAL_COPY_VISION_OPENAI_BASE_URL:-http://host.docker.internal:20128/v1}
       SIGNAL_COPY_VISION_OPENAI_API_KEY: ${SIGNAL_COPY_VISION_OPENAI_API_KEY:-}
       SIGNAL_COPY_VISION_OPENAI_MODEL: ${SIGNAL_COPY_VISION_OPENAI_MODEL:-gc/gemini-2.5-pro}
       SIGNAL_COPY_VISION_TIMEOUT_SEC: ${SIGNAL_COPY_VISION_TIMEOUT_SEC:-300}
-      # State stores
       SIGNAL_COPY_PENDING_JOURNAL: /state/pending_lifecycle.jsonl
       SIGNAL_COPY_LIFECYCLE_JOURNAL: /state/signal_lifecycle.jsonl
       SIGNAL_COPY_COMMITTEE_DECISION_JOURNAL: /state/committee_decisions.jsonl
@@ -310,21 +167,18 @@ services:
       - ./runtime/state:/state
       - ./runtime/logs:/logs
       - ./runtime/revo:/app/runtime/revo:ro
+      - ./runtime/whales:/app/runtime/whales:ro
       - ./journal:/app/journal
+      - ./signal_copy:/app/signal_copy
+      - ./execution:/app/execution
+      - ./gateway:/app/gateway
+      - ./nexus:/app/nexus
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      fastapi:
-        condition: service_started
-      gateway:
-        condition: service_started
     restart: unless-stopped
-    networks: [signalnet]
+    networks:
+      - docker_default
 
 networks:
-  signalnet:
-    driver: bridge
-
-volumes:
-  timescale_data:
-    driver: local
+  docker_default:
+    external: true

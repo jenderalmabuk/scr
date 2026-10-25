@@ -142,7 +142,7 @@ class ExecutionGateway:
                 is_vip=intent.is_vip,
                 side=side,
                 skip_entry_cooldown=pending_fill,
-                skip_cluster_limit=intent.source == "SIGNAL_COPY",
+                skip_cluster_limit=intent.source in ("SIGNAL_COPY", "AUTONOMOUS_SCANNER"),
             )
         except Exception as exc:  # never let a risk-engine bug open an unchecked trade
             res.reason = f"risk check error: {exc}"
@@ -354,10 +354,12 @@ class ExecutionGateway:
         if risk_cap_usd <= 0:
             return 0.0, 0.0, "SIGNALCOPY_RISK_PER_TRADE_USD must be greater than zero"
 
-        _mnp = getattr(self.risk_mgr, "max_notional_pct", 0.20)
-        _frac = (_mnp / 100.0) if _mnp > 1 else _mnp
-        _frac = _frac if _frac > 0 else 0.20
-        notional_cap = max(10.0, equity * _frac) if equity > 0 else None
+        # Leveraged futures position sizing cap:
+        # Allow position leverage up to GATEWAY_MAX_POSITION_LEVERAGE (default 3.5x equity, max $350)
+        # instead of clamping to spot 20% equity ($19.40).
+        max_pos_lev = max(1.0, _safe_float(os.getenv("GATEWAY_MAX_POSITION_LEVERAGE"), 3.5))
+        max_notional_env = max(10.0, _safe_float(os.getenv("GATEWAY_MAX_NOTIONAL_USD"), 350.0))
+        notional_cap = min(equity * max_pos_lev, max_notional_env) if equity > 0 else None
         risk_notional_cap = risk_cap_usd / sl_frac
         min_notional = max(0.0, _safe_float(os.getenv("GATEWAY_MIN_NOTIONAL_USD"), 10.0))
 
@@ -409,7 +411,25 @@ class ExecutionGateway:
     def _build_payload(self, intent: OrderIntent, entry: float, sl: float,
                        side: str, notional: float, risk_amount: float) -> Dict[str, Any]:
         tps = [float(t) for t in (intent.tps or [])]
-        if intent.source == "MANUAL" and os.getenv("GATEWAY_NORMALIZE_MANUAL_TPS", "true").lower() in ("1", "true", "yes"):
+        use_golden = (
+            intent.source == "AUTONOMOUS_SCANNER"
+            or (intent.source == "SIGNAL_COPY" and os.getenv("SIGNALCOPY_USE_GOLDEN_SCALP", "true").lower() in ("1", "true", "yes"))
+            or (intent.adv_snapshot or {}).get("tp_plan") == "GOLDEN_SCALP"
+        )
+        if use_golden and entry > 0 and sl > 0 and abs(entry - sl) > 0:
+            risk = abs(entry - sl)
+            prec = max(4, len(str(entry).split(".")[-1]) if "." in str(entry) else 2)
+            tp1 = round(entry + (1.5 * risk) if side == "LONG" else entry - (1.5 * risk), prec)
+            tp2 = round(entry + (3.0 * risk) if side == "LONG" else entry - (3.0 * risk), prec)
+            tps = [tp1, tp2]
+            intent.adv_snapshot = dict(intent.adv_snapshot or {})
+            intent.adv_snapshot["tp_plan"] = "GOLDEN_SCALP"
+            intent.adv_snapshot["rr1"] = 1.5
+            intent.adv_snapshot["rr2"] = 3.0
+            intent.adv_snapshot["tp1_pct"] = 0.75
+            intent.adv_snapshot["runner_pct"] = 0.25
+            intent.adv_snapshot["signal_tp_ladder"] = list(tps)
+        elif intent.source == "MANUAL" and os.getenv("GATEWAY_NORMALIZE_MANUAL_TPS", "true").lower() in ("1", "true", "yes"):
             tps, tp_plan = normalize_manual_tp_ladder(side, entry, sl, tps)
             intent.adv_snapshot = dict(intent.adv_snapshot or {})
             intent.adv_snapshot["manual_tp_plan"] = tp_plan
@@ -425,6 +445,7 @@ class ExecutionGateway:
             "sl": sl,
             **tp_payload,
             "tp_full": tp_full,
+            "tp_plan": "GOLDEN_SCALP" if use_golden else (intent.adv_snapshot or {}).get("tp_plan", ""),
             "notional": notional,
             "size_usd": notional,
             "base_notional": notional,
