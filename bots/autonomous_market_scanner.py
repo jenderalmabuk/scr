@@ -67,7 +67,9 @@ GATEWAY_TOKEN = os.getenv("GATEWAY_TOKEN", "nexus_gateway_test_2024")
 
 MIN_VOLUME_USD = float(os.getenv("AUTONOMOUS_MIN_VOL_USD", "20000000.0"))
 MAX_CONCURRENT_POSITIONS = int(os.getenv("AUTONOMOUS_MAX_POSITIONS", "10"))
+MAX_CONCURRENT_SAME_SIDE = int(os.getenv("AUTONOMOUS_MAX_SAME_SIDE", "3"))
 SCAN_INTERVAL_SEC = int(os.getenv("AUTONOMOUS_SCAN_INTERVAL_SEC", "180"))
+NON_CORRELATED_PAIRS = {"XAUTUSDT", "PAXGUSDT"}
 
 TELEGRAM_BOT_TOKEN = os.getenv("SIGNAL_COPY_TRADES_NOTIFY_BOT_TOKEN") or os.getenv("RADAR_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("SIGNAL_COPY_TRADES_NOTIFY_CHAT_ID") or os.getenv("RADAR_TELEGRAM_CHAT_ID", "")
@@ -224,6 +226,59 @@ class AutonomousMarketScanner:
         data = await asyncio.to_thread(_http_get_sync, url, headers=headers)
         return data or {}
 
+    def check_loss_streak_circuit_breaker(
+        self,
+        max_losses: int = 2,
+        window_minutes: int = 90,
+        cooldown_minutes: int = 120
+    ) -> Tuple[bool, str]:
+        """Circuit breaker: pause trading if max_losses occur within window_minutes."""
+        history_path = Path("/opt/signalcopyreal/journal/trade_history.json")
+        if not history_path.exists():
+            return False, "No history file"
+        try:
+            with history_path.open("r", encoding="utf-8") as f:
+                history = json.load(f)
+        except Exception as e:
+            return False, f"History read error: {e}"
+
+        now = datetime.now(timezone.utc)
+        closed = []
+        for t in history:
+            tc = t.get("timestamp_close") or t.get("exit_time")
+            if not tc:
+                continue
+            try:
+                dt = datetime.fromisoformat(tc.replace("Z", "+00:00"))
+                closed.append((dt, t))
+            except Exception:
+                continue
+
+        closed.sort(key=lambda x: x[0], reverse=True)
+        recent_losses = []
+        for dt, t in closed:
+            pnl = t.get("pnl_usd", t.get("realized_pnl", 0.0))
+            if pnl < 0:
+                recent_losses.append((dt, t))
+                if len(recent_losses) >= max_losses:
+                    break
+            else:
+                break
+
+        if len(recent_losses) < max_losses:
+            return False, f"Streak safe ({len(recent_losses)} recent loss)"
+
+        newest_loss_time = recent_losses[0][0]
+        oldest_loss_time = recent_losses[-1][0]
+        loss_span = (newest_loss_time - oldest_loss_time).total_seconds() / 60.0
+        time_since_newest = (now - newest_loss_time).total_seconds() / 60.0
+
+        if loss_span <= window_minutes and time_since_newest < cooldown_minutes:
+            remaining_cooldown = cooldown_minutes - time_since_newest
+            return True, f"Active: {max_losses} losses within {loss_span:.1f}m. Cooldown remaining: {remaining_cooldown:.1f}m"
+
+        return False, f"Inactive (last loss was {time_since_newest:.1f}m ago)"
+
     async def fetch_klines(self, symbol: str, tf: str = "15m", limit: int = 60) -> List[Dict[str, Any]]:
         for exchange in ["bybit", "binance"]:
             url = f"{NEXUS_API}/klines/{exchange}/{symbol}"
@@ -365,6 +420,9 @@ class AutonomousMarketScanner:
         flow_data, oi_data = await asyncio.gather(flow_task, oi_task)
 
         flow_dir = (flow_data or {}).get("flow_direction", "NEUTRAL")
+        if flow_dir in ("NO_TRADE", "CONFLICT"):
+            logger.info("[ADVERSARIAL VETO] %s %s blocked by flow_dir=%s", symbol, side, flow_dir)
+            return None
         if side == "LONG" and flow_dir == "SHORT_ONLY":
             logger.info("[ADVERSARIAL VETO] %s LONG rejected by flow_dir=SHORT_ONLY", symbol)
             return None
@@ -499,9 +557,17 @@ class AutonomousMarketScanner:
 
     async def scan_once(self) -> List[Dict[str, Any]]:
         logger.info("=== Starting Autonomous MTF IFVG Scan ===")
+
+        # Circuit Breaker: Loss Streak Protection
+        is_breaker_active, breaker_msg = self.check_loss_streak_circuit_breaker()
+        if is_breaker_active:
+            logger.warning("[CIRCUIT BREAKER] %s. Pausing scan.", breaker_msg)
+            return []
+
         portfolio = await self.get_gateway_portfolio()
         open_count = int(portfolio.get("open_position_count", 0))
         open_symbols = set(portfolio.get("open_symbols", []))
+        open_positions = portfolio.get("open_positions", [])
 
         if open_count >= MAX_CONCURRENT_POSITIONS:
             logger.info("Gateway at capacity (%d/%d positions open). Waiting...", open_count, MAX_CONCURRENT_POSITIONS)
@@ -526,6 +592,21 @@ class AutonomousMarketScanner:
 
             setup = await self.analyze_pair(symbol, btc_mode)
             if setup:
+                # Directional Concentration Guard
+                if symbol not in NON_CORRELATED_PAIRS:
+                    same_side_count = sum(
+                        1 for p in open_positions
+                        if p.get("symbol") not in NON_CORRELATED_PAIRS
+                        and p.get("side") == setup["side"]
+                        and p.get("status") != "CLOSED"
+                    )
+                    if same_side_count >= MAX_CONCURRENT_SAME_SIDE:
+                        logger.info(
+                            "[DIRECTIONAL GUARD] %s %s blocked: already %d correlated %s positions open (max=%d)",
+                            symbol, setup["side"], same_side_count, setup["side"], MAX_CONCURRENT_SAME_SIDE
+                        )
+                        continue
+
                 logger.info("🎯 [SETUP FOUND] %s %s @ %s | SL: %s (%.2f%%) | TP1: %s (1.5R) | TP2: %s (3.0R)",
                             setup["symbol"], setup["side"], setup["entry"], setup["sl"], setup["sl_pct"], setup["tp1"], setup["tp2"])
                 candidates.append(setup)
@@ -536,6 +617,7 @@ class AutonomousMarketScanner:
                     if executed:
                         open_count += 1
                         open_symbols.add(symbol)
+                        open_positions.append({"symbol": symbol, "side": setup["side"], "status": "OPEN"})
                 
                 if open_count >= MAX_CONCURRENT_POSITIONS:
                     break
