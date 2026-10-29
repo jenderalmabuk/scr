@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
@@ -672,7 +673,41 @@ class BybitMainnetTrader:
                 except Exception as tp_err:
                     logger.warning(f"[BYBIT_MAINNET] Error constructing 3-tier TP ladder for {symbol}: {tp_err}")
 
+            pos_id = str(
+                signal_metadata.get("position_id")
+                or f"pos_{symbol.lower()}_{int(now.timestamp())}_{uuid.uuid4().hex[:6]}"
+            )
+            intent_id = str(signal_metadata.get("intent_id") or "")
+            order_id = str(order_id or signal_metadata.get("order_id") or f"ord_{symbol.lower()}_{int(now.timestamp())}")
+            signal_id = str(signal_metadata.get("signal_id") or (signal_metadata.get("adv_snapshot") or {}).get("signal_id") or signal_metadata.get("tag") or "")
+            source = str(signal_metadata.get("source") or "UNKNOWN")
+            strategy = str(signal_metadata.get("strategy") or (signal_metadata.get("adv_snapshot") or {}).get("strategy") or "UNKNOWN")
+            signal_entry_price = float(signal_metadata.get("signal_entry_price", entry_price))
+            fill_entry_price = float(actual_entry)
+            raw_sl_price = float(signal_metadata.get("raw_sl_price", sl_price))
+            active_sl_price = float(sl_price)
+            target_risk_usd = float(signal_metadata.get("target_risk_usd") or (signal_metadata.get("adv_snapshot") or {}).get("target_risk_usd") or requested_risk_amount or 2.0)
+            actual_risk_usd = float(actual_risk_amount)
+            qty_opened = float(actual_qty)
+
             position = {
+                "schema_version": 1,
+                "mode": str(signal_metadata.get("mode") or "BYBIT").upper(),
+                "source": source,
+                "strategy": strategy,
+                "signal_id": signal_id,
+                "intent_id": intent_id,
+                "order_id": order_id,
+                "position_id": pos_id,
+                "signal_entry_price": signal_entry_price,
+                "fill_entry_price": fill_entry_price,
+                "raw_sl_price": raw_sl_price,
+                "active_sl_price": active_sl_price,
+                "target_risk_usd": target_risk_usd,
+                "actual_risk_usd": actual_risk_usd,
+                "qty_opened": qty_opened,
+                "qty_closed": 0.0,
+                "qty_remaining": qty_opened,
                 "symbol": symbol,
                 "exchange": "bybit",
                 "side": side,
@@ -685,12 +720,11 @@ class BybitMainnetTrader:
                 "tp_fractions": tp_fractions,
                 "tp_hit": [],
                 "qty": str(actual_qty),
-                "qty_remaining": actual_qty,
                 "initial_qty": actual_qty,
                 "risk_usd": actual_risk_amount,
                 "realized_pnl_usd": 0.0,
+                "cum_qty_closed": 0.0,
                 "notional": notional,
-                "order_id": order_id,
                 "opened_at": now.isoformat(),
                 "opened_ts": now.timestamp(),
                 "sl_kind": "ORIGINAL",
@@ -729,6 +763,8 @@ class BybitMainnetTrader:
                 "ok": True,
                 "executed": True,
                 "position_confirmed": True,
+                "position_id": pos_id,
+                "order_id": order_id,
                 "symbol": symbol,
                 "side": side,
                 "entry_price": actual_entry,
@@ -738,7 +774,6 @@ class BybitMainnetTrader:
                 "notional": notional,
                 "actual_risk_amount": actual_risk_amount,
                 "max_loss_usd_at_fill": actual_risk_amount,
-                "order_id": order_id,
             }
             
         except Exception as e:
@@ -1152,31 +1187,73 @@ class BybitMainnetTrader:
             pnl_usd = bybit_closed_pnl if bybit_closed_pnl is not None else estimated_pnl_usd
             pnl_pct = (pnl_usd / entry_notional) * 100 if entry_notional > 0 else 0
             
-            # Update realized PnL for blended R calculation
-            if not full_close:
-                pos["realized_pnl_usd"] = pos.get("realized_pnl_usd", 0.0) + pnl_usd
+            # Determine if full close or partial
+            is_final = full_close or (qty_remaining is not None and qty_remaining <= original_qty * 0.05)
+
+            # Cumulative closed quantity and remaining quantity tracking:
+            # qty_opened = qty_closed + qty_remaining
+            qty_opened = float(pos.get("qty_opened", pos.get("initial_qty", original_qty)))
+            cur_cum_closed = float(pos.get("cum_qty_closed", 0.0)) + float(close_qty)
+
+            if is_final:
+                final_qty_closed = qty_opened
+                final_qty_remaining = 0.0
+                aggregate_pnl_usd = float(pos.get("realized_pnl_usd", 0.0)) + pnl_usd
+                report_pnl_usd = aggregate_pnl_usd
+            else:
+                final_qty_closed = cur_cum_closed
+                final_qty_remaining = max(0.0, qty_opened - final_qty_closed)
+                report_pnl_usd = pnl_usd
+                pos["realized_pnl_usd"] = float(pos.get("realized_pnl_usd", 0.0)) + pnl_usd
+                pos["cum_qty_closed"] = cur_cum_closed
+                pos["qty_remaining"] = final_qty_remaining
                 logger.info(
                     f"[BYBIT_MAINNET] {symbol} realized PnL updated: "
                     f"${pos['realized_pnl_usd']:.2f} (this close: ${pnl_usd:.2f})"
                 )
-            
+
             # Calculate hold time
             opened_at = datetime.fromisoformat(pos["opened_at"].replace("Z", "+00:00"))
             now = datetime.now(timezone.utc)
             hold_minutes = (now - opened_at).total_seconds() / 60
-            
-            # Determine if full close or partial
-            is_final = full_close or (qty_remaining is not None and qty_remaining <= original_qty * 0.05)
-            
-            # Save trade history
+
+            # Calculate actual RR ladder from entry fill and actual SL / TP
+            original_sl = float(pos.get("raw_sl_price", pos.get("provider_sl_original", pos.get("sl_price", entry_price))))
+            risk_per_unit = abs(float(entry_price) - original_sl)
+            tps_list = pos.get("tp_prices") or pos.get("tp_ladder") or []
+            actual_rr_ladder = [
+                round(abs(float(tp) - float(entry_price)) / risk_per_unit, 3)
+                for tp in tps_list
+            ] if risk_per_unit > 0 else []
+
+            # Save trade history with root-level schema parity contract (v1)
             trade = {
+                "schema_version": int(pos.get("schema_version", 1)),
+                "mode": str(pos.get("mode") or "BYBIT").upper(),
+                "source": str(pos.get("source", "UNKNOWN")),
+                "strategy": str(pos.get("strategy", (pos.get("metadata") or {}).get("strategy", "UNKNOWN"))),
+                "signal_id": str(pos.get("signal_id", "")),
+                "intent_id": str(pos.get("intent_id", "")),
+                "order_id": str(pos.get("order_id", close_order_id or "")),
+                "position_id": str(pos.get("position_id", "")),
+                "signal_entry_price": float(pos.get("signal_entry_price", entry_price)),
+                "fill_entry_price": float(pos.get("fill_entry_price", entry_price)),
+                "raw_sl_price": float(pos.get("raw_sl_price", original_sl)),
+                "active_sl_price": float(pos.get("sl_price", original_sl)),
+                "target_risk_usd": float(pos.get("target_risk_usd", 2.0)),
+                "actual_risk_usd": float(pos.get("actual_risk_usd", pos.get("risk_usd", 0.0))),
+                "actual_rr_ladder": actual_rr_ladder,
+                "qty_opened": qty_opened,
+                "qty_closed": final_qty_closed,
+                "qty_remaining": final_qty_remaining,
                 "symbol": symbol,
                 "exchange": "bybit",
                 "side": side,
                 "entry_price": entry_price,
                 "exit_price": exit_price,
                 "qty": close_qty,
-                "pnl_usd": round(pnl_usd, 2),
+                "pnl_usd": round(report_pnl_usd, 2),
+                "slice_pnl_usd": round(pnl_usd, 2),
                 "pnl_pct": round(pnl_pct, 2),
                 "pnl_source": pnl_source,
                 "bybit_closed_pnl_usd": round(bybit_closed_pnl, 8) if bybit_closed_pnl is not None else None,
@@ -1193,8 +1270,6 @@ class BybitMainnetTrader:
                 "hold_minutes": round(hold_minutes, 1),
                 "partial": not is_final,
                 "qty_original": original_qty,
-                "qty_closed": close_qty,
-                "qty_remaining": qty_remaining if not is_final else 0,
                 "metadata": pos.get("metadata", {})
             }
             
@@ -1390,14 +1465,43 @@ class BybitMainnetTrader:
                         except:
                             balance = 0
                         
+                        original_sl = float(pos.get("raw_sl_price", pos.get("provider_sl_original", pos.get("sl_price", entry_price))))
+                        risk_per_unit = abs(float(entry_price) - original_sl)
+                        tps_list = pos.get("tp_prices") or pos.get("tp_ladder") or []
+                        actual_rr_ladder = [
+                            round(abs(float(tp) - float(entry_price)) / risk_per_unit, 3)
+                            for tp in tps_list
+                        ] if risk_per_unit > 0 else []
+                        qty_opened = float(pos.get("qty_opened", pos.get("initial_qty", qty)))
+                        aggregate_pnl = float(pos.get("realized_pnl_usd", 0.0)) + pnl_usd
+
                         self._append_history({
+                            "schema_version": int(pos.get("schema_version", 1)),
+                            "mode": str(pos.get("mode") or "BYBIT").upper(),
+                            "source": str(pos.get("source", "UNKNOWN")),
+                            "strategy": str(pos.get("strategy", (pos.get("metadata") or {}).get("strategy", "UNKNOWN"))),
+                            "signal_id": str(pos.get("signal_id", "")),
+                            "intent_id": str(pos.get("intent_id", "")),
+                            "order_id": str(pos.get("order_id", "")),
+                            "position_id": str(pos.get("position_id", "")),
+                            "signal_entry_price": float(pos.get("signal_entry_price", entry_price)),
+                            "fill_entry_price": float(pos.get("fill_entry_price", entry_price)),
+                            "raw_sl_price": float(pos.get("raw_sl_price", original_sl)),
+                            "active_sl_price": float(pos.get("sl_price", original_sl)),
+                            "target_risk_usd": float(pos.get("target_risk_usd", 2.0)),
+                            "actual_risk_usd": float(pos.get("actual_risk_usd", pos.get("risk_usd", 0.0))),
+                            "actual_rr_ladder": actual_rr_ladder,
+                            "qty_opened": qty_opened,
+                            "qty_closed": qty_opened,
+                            "qty_remaining": 0.0,
                             "symbol": symbol,
                             "exchange": "bybit",
                             "side": side,
                             "entry_price": entry_price,
                             "exit_price": exit_price,
                             "qty": qty,
-                            "pnl_usd": round(pnl_usd, 2),
+                            "pnl_usd": round(aggregate_pnl, 2),
+                            "slice_pnl_usd": round(pnl_usd, 2),
                             "pnl_pct": round(pnl_pct, 2),
                             "pnl_source": "bybit_closed_pnl" if bybit_closed_pnl is not None else "bot_estimate",
                             "bybit_closed_pnl_usd": round(bybit_closed_pnl, 8) if bybit_closed_pnl is not None else None,
@@ -1410,8 +1514,6 @@ class BybitMainnetTrader:
                             "hold_minutes": round(hold_minutes, 1),
                             "partial": False,
                             "qty_original": qty,
-                            "qty_closed": qty,
-                            "qty_remaining": 0,
                             "metadata": pos.get("metadata", {}),
                         })
                         await send_close_trade({
