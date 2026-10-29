@@ -2,7 +2,30 @@
 """
 Unit test for end-to-end lifecycle provenance contract:
 OrderIntent -> open position -> partial close -> final close -> trade_history.json
+Designed to run with pure Python standard library (unittest) without requiring third-party packages.
 """
+
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+# Add project root to sys.path
+PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# Ensure test runs in standard library environment without failing on external aiohttp dependency
+if "aiohttp" not in sys.modules:
+    try:
+        import aiohttp
+    except ImportError:
+        mock_aiohttp = MagicMock()
+        mock_session = MagicMock()
+        mock_session.close = AsyncMock()
+        mock_session.get = MagicMock()
+        mock_aiohttp.ClientSession = MagicMock(return_value=mock_session)
+        mock_aiohttp.ClientTimeout = MagicMock()
+        sys.modules["aiohttp"] = mock_aiohttp
 
 import asyncio
 import json
@@ -11,8 +34,6 @@ import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 from gateway.order_intent import OrderIntent
 from gateway.service import ExecutionGateway
