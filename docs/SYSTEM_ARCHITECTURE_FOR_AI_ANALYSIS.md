@@ -11,34 +11,34 @@ This document provides a complete technical reference for developers and externa
 ```mermaid
 flowchart TD
     subgraph Sourcing["Alpha Generation Sourcing"]
-        A1["Autonomous Scanner\n(MTF IFVG-Pro Engine)\nbots/autonomous_market_scanner.py"]
-        A2["Signal Copy Orchestrator\n(38 Telegram Channels + OCR Vision)\nsignal_copy/orchestrator.py"]
+        A1["Autonomous Scanner<br/>MTF IFVG-Pro Engine<br/>bots/autonomous_market_scanner.py"]
+        A2["Signal Copy Orchestrator<br/>38 Telegram Channels plus OCR Vision<br/>signal_copy/orchestrator.py"]
     end
 
-    subgraph Intelligence["Validation & Intelligence (Microservices)"]
-        B1["FastAPI Analytics (:8000)\nCVD Proxy, OI Deltas, Funding, Klines\napi/main.py"]
-        B2["Adversarial Committee & Gate\nDirection, RSI, Volatility, Regime\nsignal_copy/adversarial_committee.py"]
-        B3["Whale Scanner\nCEX & Solana Whale Radar\nbots/cex_whale_scanner.py"]
+    subgraph Intelligence["Validation and Intelligence Microservices"]
+        B1["FastAPI Analytics Port 8000<br/>CVD Proxy, OI Deltas, Funding, Klines<br/>api/main.py"]
+        B2["Adversarial Committee and Gate<br/>Direction, RSI, Volatility, Regime<br/>signal_copy/adversarial_committee.py"]
+        B3["Whale Scanner<br/>CEX and Solana Whale Radar<br/>bots/cex_whale_scanner.py"]
     end
 
-    subgraph Gateway["Unified Gateway (:8787)"]
-        C1["Gateway Service Router\ngateway/service.py"]
-        C2["Risk Engine (2% / $2.00 Risk)\nFutures Leverage Sizing (up to 3.5x)\nrisk/risk_engine.py"]
-        C3["Collision Guard\n& Directional Bias Cap"]
+    subgraph Gateway["Unified Gateway Port 8787"]
+        C1["Gateway Service Router<br/>gateway/service.py"]
+        C2["Risk Engine 2pct Risk Budget<br/>Futures Leverage Sizing up to 3.5x<br/>risk/risk_engine.py"]
+        C3["Collision Guard<br/>and Directional Bias Cap"]
     end
 
-    subgraph Execution["Execution & Life-Cycle Management"]
-        D1["Paper Mainnet Trader\n(Real Price Matching Engine)\nexecution/paper_mainnet_trader.py"]
-        D2["Golden Scalp-Runner Engine\nTP1: 1.5R (75%) -> Lock SL BEP+\nTP2: 3.0R (25% Runner)"]
-        D3["Dynamic Exits\n(Smart Scratch Exit & Damage Reducer)\nexecution/smart_scratch_exit.py"]
-        D4["Bybit Live Trader (Optional)\nexecution/bybit_mainnet_trader.py"]
+    subgraph Execution["Execution and Life-Cycle Management"]
+        D1["Paper Mainnet Trader<br/>Real Price Matching Engine<br/>execution/paper_mainnet_trader.py"]
+        D2["Golden Scalp-Runner Engine<br/>TP1 1.5R 75pct to Lock SL BEP<br/>TP2 3.0R 25pct Runner"]
+        D3["Dynamic Exits<br/>Smart Scratch Exit and Damage Reducer<br/>execution/smart_scratch_exit.py"]
+        D4["Bybit Live Trader Optional<br/>execution/bybit_mainnet_trader.py"]
     end
 
-    subgraph Journal["State & Persistence Layer"]
+    subgraph Journal["State and Persistence Layer"]
         E1[("journal/open_positions.json")]
         E2[("journal/trade_history.json")]
         E3[("journal/paper_equity.json")]
-        E4[("TimescaleDB (:5432) & Redis (:6379)")]
+        E4[("TimescaleDB and Redis")]
     end
 
     A1 -->|OrderIntent| C1
