@@ -18,6 +18,8 @@ simply makes that path the ONLY path, shared by all engines.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import logging
 import os
 from dataclasses import dataclass, field
@@ -124,6 +126,33 @@ class ExecutionGateway:
                 await self.smart_virtual_book.capture(intent)
             except Exception as exc:
                 logger.warning("[GATEWAY] smart virtual capture failed %s: %s", symbol, exc)
+
+        # Pre-fill Symbol HARD_SL Cooldown Guard (60 min default)
+        sl_cooldown_sec = float(os.getenv("SYMBOL_HARD_SL_COOLDOWN_SEC", "3600.0"))
+        if sl_cooldown_sec > 0:
+            last_sl_time = self._get_symbol_last_sl_time(symbol)
+            if last_sl_time > 0:
+                elapsed = time.time() - last_sl_time
+                if elapsed < sl_cooldown_sec:
+                    remaining_m = (sl_cooldown_sec - elapsed) / 60.0
+                    res.reason = f"SYMBOL_HARD_SL_COOLDOWN_ACTIVE: {symbol} in cooldown for {remaining_m:.1f}m after stop loss"
+                    logger.warning("[GATEWAY] %s", res.reason)
+                    return self._record(intent, res)
+
+        # Pre-fill BTC Fast Regime Revalidation Guard for SHORT intents
+        if side == "SHORT" and os.getenv("GATEWAY_BTC_REGIME_REVALIDATE", "true").lower() in ("1", "true", "yes"):
+            try:
+                from signal_copy.btc_regime_gate import BtcRegimeGate
+                gate = BtcRegimeGate.get_instance()
+                btc_info = await gate.get_btc_regime()
+                reg = str(btc_info.get("regime", "")).upper()
+                diff = float(btc_info.get("diff_pct", 0.0))
+                if reg in ("PUMP", "STRONG_BULLISH") or diff > 0.35:
+                    res.reason = f"REGIME_FLIPPED_BEFORE_FILL: BTC in {reg} regime (+{diff:.2f}% above VWAP)"
+                    logger.warning("[GATEWAY] %s %s blocked: %s", symbol, side, res.reason)
+                    return self._record(intent, res)
+            except Exception as exc:
+                logger.debug("[GATEWAY] btc regime revalidation check skipped: %s", exc)
 
         # 2) Hard cap counts running positions only. Pending setup limits stay unlimited.
         max_running = self.risk_mgr.get_max_running_positions()
@@ -262,6 +291,31 @@ class ExecutionGateway:
         logger.info("[GATEWAY] OPENED %s src=%s %s notional=%.2f risk=%.2f intent=%s",
                     symbol, intent.source, side, res.notional, res.risk_amount, intent.intent_id)
         return self._record(intent, res)
+
+    def _get_symbol_last_sl_time(self, symbol: str) -> float:
+        """Get timestamp of last HARD_SL exit for symbol from memory or trade history."""
+        mem_time = getattr(self, '_symbol_sl_times', {}).get(symbol, 0.0)
+        if mem_time > 0:
+            return mem_time
+        history_path = Path("/opt/signalcopyreal/journal/trade_history.json")
+        if not history_path.exists():
+            return 0.0
+        try:
+            import json
+            from datetime import datetime, timezone
+            with history_path.open("r", encoding="utf-8") as f:
+                history = json.load(f)
+            for t in reversed(history[-20:]):
+                if t.get("symbol") == symbol:
+                    reason = str(t.get("normalized_reason") or t.get("exit_reason") or "").upper()
+                    if "HARD_SL" in reason or "STOP_LOSS" in reason or "SL" in reason:
+                        tc = t.get("timestamp_close") or t.get("exit_time")
+                        if tc:
+                            dt = datetime.fromisoformat(tc.replace("Z", "+00:00"))
+                            return dt.timestamp()
+        except Exception:
+            pass
+        return 0.0
 
     def portfolio(self) -> Dict[str, Any]:
         """One unified view of the whole book — every engine included."""

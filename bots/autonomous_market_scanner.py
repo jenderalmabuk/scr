@@ -430,6 +430,32 @@ class AutonomousMarketScanner:
             logger.info("[ADVERSARIAL VETO] %s SHORT rejected by flow_dir=LONG_ONLY", symbol)
             return None
 
+        # Directional Flow Discipline:
+        # BOTH_ALLOWED or NEUTRAL is NOT a directional confirmation for SHORT.
+        is_flow_confirmed = False
+        if side == "SHORT":
+            if flow_dir in ("SHORT_ONLY", "STRONG_SELL"):
+                is_flow_confirmed = True
+            elif flow_dir in ("BOTH_ALLOWED", "NEUTRAL"):
+                cvd_delta = float((flow_data or {}).get("cvd_delta_usd", 0.0))
+                taker_ratio = float((flow_data or {}).get("taker_buy_ratio", 0.50))
+                if cvd_delta > 50000 or taker_ratio > 0.55:
+                    logger.info("[ADVERSARIAL VETO] %s SHORT rejected: flow is %s but taker flow is bullish (delta=+$%.0f, taker_ratio=%.2f)",
+                                symbol, flow_dir, cvd_delta, taker_ratio)
+                    return None
+                is_flow_confirmed = False
+        elif side == "LONG":
+            if flow_dir in ("LONG_ONLY", "STRONG_BUY"):
+                is_flow_confirmed = True
+            elif flow_dir in ("BOTH_ALLOWED", "NEUTRAL"):
+                cvd_delta = float((flow_data or {}).get("cvd_delta_usd", 0.0))
+                taker_ratio = float((flow_data or {}).get("taker_buy_ratio", 0.50))
+                if cvd_delta < -50000 or taker_ratio < 0.45:
+                    logger.info("[ADVERSARIAL VETO] %s LONG rejected: flow is %s but taker flow is bearish (delta=-$%.0f, taker_ratio=%.2f)",
+                                symbol, flow_dir, abs(cvd_delta), taker_ratio)
+                    return None
+                is_flow_confirmed = False
+
         oi_history = (oi_data or {}).get("data", [])
         if oi_history and len(oi_history) >= 2:
             last_oi_delta = float(oi_history[-1].get("oi_delta_pct", 0.0))
@@ -463,6 +489,7 @@ class AutonomousMarketScanner:
             "sl_pct": sl_pct,
             "rsi_15m": round(rsi_15m, 1),
             "flow_dir": flow_dir,
+            "is_flow_confirmed": is_flow_confirmed,
             "regime": "MTF_IFVG_PRO",
             "gap_atr": round(min_gap / atr_15m, 2),
             "strategy": "MTF_IFVG_PRO",
@@ -541,7 +568,7 @@ class AutonomousMarketScanner:
             f"   • Macro: 1h EMA 20/50 Trend Aligned ✅\n"
             f"   • Trigger: 15m IFVG Inversion (Gap >= 0.5 ATR) ✅\n"
             f"   • Floor SL: Anti-Wick Floor >= 1.0% ✅\n"
-            f"   • Orderflow: CVD/OI Confirmed ({setup['flow_dir']}) ✅\n\n"
+            f"   • Orderflow: {"Confirmed" if setup.get("is_flow_confirmed") else "Permissive"} ({setup['flow_dir']}) {"✅" if setup.get("is_flow_confirmed") else "⚠️"}\n\n"
             f"🔗 <a href='{tv_link}'>TradingView Chart</a> │ <a href='{trade_link}'>Bybit Trade</a>\n"
             f"<i>Execution: Paper Mainnet Gateway (Real Price Matching)</i>"
         )

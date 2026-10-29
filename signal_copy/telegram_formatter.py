@@ -18,9 +18,9 @@ def format_price(price: float) -> str:
         return f"{price:.6f}"
     if price < 1:
         return f"{price:.4f}"
-    if price < 100:
-        return f"{price:.2f}"
-    return f"{price:.0f}"
+    if price < 1000:
+        return f"{price:.4f}"
+    return f"{price:.2f}"
 
 
 def get_tradingview_link(symbol: str, timeframe: str = "15m") -> str:

@@ -976,13 +976,28 @@ class PaperMainnetTrader:
         if mark <= 0 or age_sec > 30.0:
             return {"ok": False, "executed": False, "code": "STALE_GATEWAY_MARK",
                     "reason": f"STALE_GATEWAY_MARK: age={age_sec:.3f} source={mark_source}"}
-        # SignalCopy already resolves a fresh live price. Reject a materially
-        # divergent exchange mark instead of treating stale cache as market truth.
-        if requested_entry > 0 and mark > 0 and abs(mark - requested_entry) / requested_entry > 0.05:
-            logger.warning("[PAPER] %s stale mark %.6g vs fresh route %.6g — reject", symbol, mark, requested_entry)
-            return {"ok": False, "executed": False, "code": "STALE_GATEWAY_MARK",
-                    "reason": f"STALE_GATEWAY_MARK: gateway={mark:.8g} route={requested_entry:.8g} source={mark_source}",
-                    "price_source": mark_source}
+        # Strict Entry Deviation Guard:
+        # Reject if market has moved unfavorably past tolerance (0.25%).
+        # For SHORT: mark > requested_entry means price drifted up towards SL.
+        # For LONG: mark < requested_entry means price drifted down towards SL.
+        max_entry_dev = float(os.getenv("MAX_ENTRY_DEVIATION_PCT", "0.0025"))
+        if requested_entry > 0 and mark > 0:
+            drift = (mark - requested_entry) / requested_entry
+            if side == "SHORT" and drift > max_entry_dev:
+                logger.warning("[PAPER] %s SHORT adverse drift +%.4f%% > max %.4f%% (mark=%.6g req=%.6g) — reject",
+                               symbol, drift * 100.0, max_entry_dev * 100.0, mark, requested_entry)
+                return {"ok": False, "executed": False, "code": "ENTRY_CHASE_EXCEEDED",
+                        "reason": f"ENTRY_CHASE_EXCEEDED: SHORT drifted +{drift*100:.2f}% (max +{max_entry_dev*100:.2f}%) mark={mark:.6g} req={requested_entry:.6g}"}
+            if side == "LONG" and drift < -max_entry_dev:
+                logger.warning("[PAPER] %s LONG adverse drift %.4f%% < -max %.4f%% (mark=%.6g req=%.6g) — reject",
+                               symbol, drift * 100.0, max_entry_dev * 100.0, mark, requested_entry)
+                return {"ok": False, "executed": False, "code": "ENTRY_CHASE_EXCEEDED",
+                        "reason": f"ENTRY_CHASE_EXCEEDED: LONG drifted {drift*100:.2f}% (max -{max_entry_dev*100:.2f}%) mark={mark:.6g} req={requested_entry:.6g}"}
+            if abs(drift) > max_entry_dev * 2.5:
+                logger.warning("[PAPER] %s excessive mark divergence %.4f%% (mark=%.6g req=%.6g) — reject",
+                               symbol, drift * 100.0, mark, requested_entry)
+                return {"ok": False, "executed": False, "code": "STALE_GATEWAY_MARK",
+                        "reason": f"STALE_GATEWAY_MARK: drift={drift*100:.2f}% mark={mark:.6g} req={requested_entry:.6g}"}
         if mark <= 0:
             logger.warning("[PAPER] no mainnet price for %s — reject", symbol)
             return {"ok": False, "executed": False, "code": "NO_MARKET_PRICE",
@@ -1000,19 +1015,39 @@ class PaperMainnetTrader:
         tp_ladder = [tp for tp in tp_ladder
                      if (tp > mark if side == "LONG" else tp < mark)]
         if not tp_ladder:
-            logger.warning("[PAPER] %s %s all provider targets already passed — reject stale fill",
-                           symbol, side)
-            return None
+            tp1_candidate = float(params.get("tp1") or 0.0)
+            if tp1_candidate > 0 and (tp1_candidate > mark if side == "LONG" else tp1_candidate < mark):
+                tp_ladder = [tp1_candidate]
+            elif sl_price and abs(fill - sl_price) > 0:
+                risk = abs(fill - sl_price)
+                tp1_synth = fill + (1.5 * risk) if side == "LONG" else fill - (1.5 * risk)
+                tp2_synth = fill + (3.0 * risk) if side == "LONG" else fill - (3.0 * risk)
+                tp_ladder = [tp1_synth, tp2_synth]
+            else:
+                logger.warning("[PAPER] %s %s all provider targets already passed — reject stale fill",
+                               symbol, side)
+                return {"ok": False, "executed": False, "code": "ALL_TARGETS_PASSED",
+                        "reason": "all provider targets already passed"}
         tp1 = tp_ladder[0]
 
         # Sanity guard: reject if signal SL is on the wrong side of the fill
         # (protects against fake fills that would instant-stop).
         if side == "LONG" and sl_price >= fill:
             logger.warning("[PAPER] %s LONG SL %.6g >= fill %.6g — reject (instant-stop guard)", symbol, sl_price, fill)
-            return None
+            return {"ok": False, "executed": False, "code": "INSTANT_STOP_GUARD", "reason": f"LONG SL {sl_price} >= fill {fill}"}
         if side == "SHORT" and sl_price and sl_price <= fill:
             logger.warning("[PAPER] %s SHORT SL %.6g <= fill %.6g — reject (instant-stop guard)", symbol, sl_price, fill)
-            return None
+            return {"ok": False, "executed": False, "code": "INSTANT_STOP_GUARD", "reason": f"SHORT SL {sl_price} <= fill {fill}"}
+
+        # Minimum SL distance guard: reject if fill is dangerously close to SL (< 0.50%)
+        if sl_price and fill > 0:
+            sl_distance_pct = abs(fill - sl_price) / fill
+            min_sl_dist = float(os.getenv("MIN_ENTRY_SL_DISTANCE_PCT", "0.0050"))
+            if sl_distance_pct < min_sl_dist:
+                logger.warning("[PAPER] %s %s fill %.6g too close to SL %.6g (distance %.3f%% < min %.3f%%) — reject",
+                               symbol, side, fill, sl_price, sl_distance_pct * 100.0, min_sl_dist * 100.0)
+                return {"ok": False, "executed": False, "code": "SL_TOO_CLOSE_TO_FILL",
+                        "reason": f"SL_TOO_CLOSE_TO_FILL: distance={sl_distance_pct*100:.3f}% < min {min_sl_dist*100:.3f}%"}
 
 
         # Final defense at actual fill. Gateway sizing may race price movement;
@@ -1021,17 +1056,33 @@ class PaperMainnetTrader:
         adverse_sl_fill = self._adverse_fill(sl_price, side, opening=False)
         stop_gross_loss = abs(fill - adverse_sl_fill) * qty
         max_loss_at_fill = stop_gross_loss + self._fee(fill * qty) + self._fee(adverse_sl_fill * qty)
-        if self.risk_mgr is not None and hasattr(self.risk_mgr, "get_current_equity"):
-            max_trade_loss = max(0.0, float(self.risk_mgr.get_current_equity()) * 0.01)
-            if max_loss_at_fill > max_trade_loss and max_loss_at_fill > 0:
-                scale = max_trade_loss / max_loss_at_fill
-                notional *= scale
-                qty = notional / fill
-                max_loss_at_fill = (
-                    abs(fill - adverse_sl_fill) * qty
-                    + self._fee(fill * qty)
-                    + self._fee(adverse_sl_fill * qty)
-                )
+        # Unified Sizing Path:
+        # Respect planned_risk_amount passed from Gateway, or SIGNALCOPY_RISK_PER_TRADE_USD
+        planned_risk = float(params.get("planned_risk_amount") or params.get("risk_amount") or params.get("target_risk_usd") or 0.0)
+        if planned_risk <= 0:
+            planned_risk = max(0.0, float(os.getenv("SIGNALCOPY_RISK_PER_TRADE_USD", "2.0")))
+            equity = (float(self.risk_mgr.get_current_equity())
+                      if self.risk_mgr is not None and hasattr(self.risk_mgr, "get_current_equity")
+                      else 100.0)
+            start_balance = float(os.getenv("STARTING_BALANCE", "100.0"))
+            if start_balance > 0 and equity < start_balance:
+                dd_pct = (1.0 - (equity / start_balance)) * 100.0
+                if dd_pct >= 20.0:
+                    planned_risk = min(planned_risk, 0.50)
+                elif dd_pct >= 10.0:
+                    planned_risk = min(planned_risk, 1.00)
+
+        max_trade_loss = planned_risk
+        if max_trade_loss > 0 and max_loss_at_fill > max_trade_loss and max_loss_at_fill > 0:
+            scale = max_trade_loss / max_loss_at_fill
+            notional *= scale
+            qty = notional / fill
+            stop_gross_loss = abs(fill - adverse_sl_fill) * qty
+            max_loss_at_fill = (
+                stop_gross_loss
+                + self._fee(fill * qty)
+                + self._fee(adverse_sl_fill * qty)
+            )
         if qty <= 0 or max_loss_at_fill <= 0:
             return {"ok": False, "executed": False, "code": "INVALID_ACTUAL_FILL_RISK",
                     "reason": "INVALID_ACTUAL_FILL_RISK"}
