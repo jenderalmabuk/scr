@@ -396,10 +396,17 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
             if not (best_rr is not None and best_rr >= 1.5 and tp1_rr >= 0.65):
                 hard_blocks.append(f"UNFAVORABLE_GEOMETRY: TP1 RR is {tp1_rr:.2f} (minimum required is {min_tp1_rr:.2f})")
 
-    # Filter 1: Macro Guard - Block SHORTs if BTC is strongly bullish / risk-on
+    # Filter 1: Macro Guard - Resilience v1.0 Weighted Penalty / Extreme Hard Veto
     btc_gate = metrics.get("btc_gate", {})
+    macro_penalty = 0.0
     if btc_gate.get("blocked", False):
-        hard_blocks.append(btc_gate.get("reason", "BTC Dump Risk on High-Beta Pair"))
+        diff_pct = float(btc_gate.get("btc_diff_pct", 0.0) or 0.0)
+        ret_15m = float(btc_gate.get("btc_ret_15m", 0.0) or 0.0)
+        extreme_threshold = getattr(vc, "MACRO_EXTREME_DUMP_PCT", -1.50)
+        if diff_pct < extreme_threshold or ret_15m < extreme_threshold:
+            hard_blocks.append(f"HARD_VETO_EXTREME_DUMP: {btc_gate.get('reason')}")
+        else:
+            macro_penalty = getattr(vc, "MACRO_MODERATE_PENALTY", 18.0)
     
     btc_regime = str(metrics.get("btc_bias", "NEUTRAL")).upper()
     btc_diff = float(metrics.get("btc_diff_pct", 0.0) or 0.0)
@@ -424,10 +431,31 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
 
     earned = sum(f.score for f in factors)
     possible = sum(f.max_score for f in factors)
-    score = (earned / possible * 100.0) if possible else 0.0
+    raw_score = (earned / possible * 100.0) if possible else 0.0
+
+    # Apply macro penalty if moderate dump occurred
+    if macro_penalty > 0.0:
+        score = max(0.0, raw_score - macro_penalty)
+        metrics["macro_penalty_applied"] = macro_penalty
+    else:
+        score = raw_score
+
+    # Anti-Average Trap check (Component 4)
+    min_comp_pct = 100.0
+    for f in factors:
+        if f.max_score > 0 and f.name in ("Price/Entry", "MTF Alignment", "TradingView", "CVD/Flow"):
+            pct = (f.score / f.max_score) * 100.0
+            if pct < min_comp_pct:
+                min_comp_pct = pct
+
+    min_required_comp = getattr(vc, "MIN_COMPONENT_PCT", 25.0)
 
     if hard_blocks:
         verdict = Verdict.REJECT
+    elif min_comp_pct < min_required_comp:
+        # One core component collapsed -> cannot be fully VALID (Anti-Average Trap)
+        verdict = Verdict.WEAK
+        metrics["anti_average_trap_flag"] = f"core component collapsed ({min_comp_pct:.1f}% < {min_required_comp:.1f}%)"
     elif score >= vc.VALID_THRESHOLD:
         verdict = Verdict.VALID
     elif score >= vc.WEAK_THRESHOLD:
@@ -442,16 +470,20 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
         factors=factors,
         hard_blocks=hard_blocks,
         metrics_snapshot={
-            k: metrics.get(k)
-            for k in (
-                "price", "oi_change_5m_pct", "oi_change_15m_pct", "oi_change_1h_pct",
-                "cvd_zscore", "imbalance", "funding_rate", "rsi", "atr_pct",
-                "vol_ratio", "price_change_15m_pct", "regime_label", "qvol_5m",
-                "flow_direction", "flow_source", "data_quality", "data_stale",
-                "flow_lookup_status", "flow_symbol_found", "mtf_alignment",
-                "tradingview", "chart_vision",
-                "btc_gate", "btc_correlation", "btc_bias", "btc_diff_pct", "btc_vwap",
-            )
+            **{
+                k: metrics.get(k)
+                for k in (
+                    "price", "oi_change_5m_pct", "oi_change_15m_pct", "oi_change_1h_pct",
+                    "cvd_zscore", "imbalance", "funding_rate", "rsi", "atr_pct",
+                    "vol_ratio", "price_change_15m_pct", "regime_label", "qvol_5m",
+                    "flow_direction", "flow_source", "data_quality", "data_stale",
+                    "flow_lookup_status", "flow_symbol_found", "mtf_alignment",
+                    "tradingview", "chart_vision",
+                    "btc_gate", "btc_correlation", "btc_bias", "btc_diff_pct", "btc_vwap",
+                )
+            },
+            "anti_average_trap_flag": metrics.get("anti_average_trap_flag"),
+            "macro_penalty_applied": metrics.get("macro_penalty_applied"),
         },
     )
 

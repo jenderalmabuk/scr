@@ -42,8 +42,11 @@ W_TREND           = 10.0   # short-term structure alignment
 W_CHART_VISION    = 14.0   # chart/outlook image agrees with the trade (vision)
 
 # --- verdict thresholds (normalized 0-100) ---
-VALID_THRESHOLD = _float_env("SIGNAL_COPY_VALID_THRESHOLD", 60.0)     # >= this => VALID quality
-WEAK_THRESHOLD  = _float_env("SIGNAL_COPY_WEAK_THRESHOLD", 45.0)      # >= this but < VALID => WEAK
+VALID_THRESHOLD = _float_env("SIGNAL_COPY_VALID_THRESHOLD", 50.0)     # >= this => VALID quality (Resilience v1.0)
+WEAK_THRESHOLD  = _float_env("SIGNAL_COPY_WEAK_THRESHOLD", 35.0)      # >= this but < VALID => WEAK (Resilience v1.0)
+MIN_COMPONENT_PCT = _float_env("SIGNAL_COPY_MIN_COMPONENT_PCT", 25.0) # Anti-Average Trap threshold
+MACRO_MODERATE_PENALTY = _float_env("SIGNAL_COPY_MACRO_MODERATE_PENALTY", 18.0)
+MACRO_EXTREME_DUMP_PCT = _float_env("SIGNAL_COPY_MACRO_EXTREME_DUMP_PCT", -1.50)
 
 # --- auto-execution policy thresholds ---
 AUTO_MARKET_MIN_SCORE = _float_env("SIGNAL_COPY_AUTO_MARKET_MIN_SCORE", 60.0)
