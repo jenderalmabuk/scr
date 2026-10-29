@@ -616,6 +616,16 @@ class SignalCopyOrchestrator:
                 await apply_timeframe_metrics(sig, metrics)
             except Exception as exc:
                 logger.warning("[SIGNAL_COPY] timeframe metrics failed: %s", exc)
+        # --- Shadow CVD (30d Whale Taker Flow & Fakeout Shield) & Whale Flush ---
+        try:
+            from .shadow_cvd import get_symbol_shadow_cvd, check_whale_flush_shield
+            metrics["shadow_cvd"] = get_symbol_shadow_cvd(sig.symbol)
+            is_flush, flush_reason = check_whale_flush_shield(sig.symbol, sig.is_long)
+            if is_flush:
+                metrics["whale_flush"] = {"blocked": True, "reason": flush_reason}
+        except Exception as exc:
+            logger.debug("[SHADOW_CVD] enrich failed for %s: %s", sig.symbol, exc)
+
         # Make the signal executable even if the channel omitted TP/SL:
         # improvise SL from ATR and TP ladder as 1R/2R/3R from the stop.
         try:

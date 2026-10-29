@@ -396,6 +396,11 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
             if not (best_rr is not None and best_rr >= 1.5 and tp1_rr >= 0.65):
                 hard_blocks.append(f"UNFAVORABLE_GEOMETRY: TP1 RR is {tp1_rr:.2f} (minimum required is {min_tp1_rr:.2f})")
 
+    # Filter 0: Whale Flush Shield (Anti-Liquidation Cascade)
+    whale_flush = metrics.get("whale_flush", {})
+    if whale_flush.get("blocked", False):
+        hard_blocks.append(f"HARD_VETO_WHALE_FLUSH: {whale_flush.get('reason', 'Massive opposing liquidation cascade')}")
+
     # Filter 1: Macro Guard - Resilience v1.0 Weighted Penalty / Extreme Hard Veto
     btc_gate = metrics.get("btc_gate", {})
     macro_penalty = 0.0
@@ -439,6 +444,26 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
         metrics["macro_penalty_applied"] = macro_penalty
     else:
         score = raw_score
+
+    # Shadow CVD (30d Whale Flow & Fakeout Shield - ranker.py integration)
+    shadow_cvd = metrics.get("shadow_cvd", {})
+    if shadow_cvd.get("status") == "ACTIVE":
+        s_verdict = shadow_cvd.get("verdict", "NEUTRAL")
+        c7 = float(shadow_cvd.get("cvd_7d", 0.0) or 0.0)
+        c30 = float(shadow_cvd.get("cvd_30d", 0.0) or 0.0)
+
+        # Fakeout Trap / Net Dump Divergence:
+        # LONG into DISTRIBUTION or SHORT into ACCUMULATION
+        if (sig.is_long and s_verdict == "DISTRIBUTION") or ((not sig.is_long) and s_verdict == "ACCUMULATION"):
+            cvd_penalty = getattr(vc, "SHADOW_CVD_PENALTY", 15.0)
+            score = max(0.0, score - cvd_penalty)
+            metrics["shadow_cvd_penalty_applied"] = cvd_penalty
+            metrics["fakeout_risk_flag"] = f"flow_divergence_{s_verdict} (7d={c7:+.2f}, 30d={c30:+.2f})"
+        elif (sig.is_long and s_verdict == "ACCUMULATION") or ((not sig.is_long) and s_verdict == "DISTRIBUTION"):
+            cvd_bonus = getattr(vc, "SHADOW_CVD_BONUS", 5.0)
+            score = min(100.0, score + cvd_bonus)
+            metrics["shadow_cvd_bonus_applied"] = cvd_bonus
+            metrics["whale_flow_backed"] = f"whale_{s_verdict}_confirmed (7d={c7:+.2f}, 30d={c30:+.2f})"
 
     # Anti-Average Trap check (Component 4)
     min_comp_pct = 100.0
@@ -484,6 +509,10 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
             },
             "anti_average_trap_flag": metrics.get("anti_average_trap_flag"),
             "macro_penalty_applied": metrics.get("macro_penalty_applied"),
+            "shadow_cvd_penalty_applied": metrics.get("shadow_cvd_penalty_applied"),
+            "shadow_cvd_bonus_applied": metrics.get("shadow_cvd_bonus_applied"),
+            "fakeout_risk_flag": metrics.get("fakeout_risk_flag"),
+            "whale_flow_backed": metrics.get("whale_flow_backed"),
         },
     )
 

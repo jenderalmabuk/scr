@@ -1,0 +1,1170 @@
+{
+  "timestamp_utc": "2026-10-29T03:27:02.851280+00:00",
+  "trade_metrics": {
+    "total_records": 1526,
+    "closed_trades": 502,
+    "open_trades": 1024,
+    "wins": 215,
+    "losses": 283,
+    "breakeven": 4,
+    "win_rate_pct": 42.83,
+    "total_pnl_usd": -726.92,
+    "total_gross_profit": 547.08,
+    "total_gross_loss": 1274.0,
+    "profit_factor": 0.43,
+    "total_fee_usd": 0.0,
+    "long_stats": {
+      "count": 300,
+      "pnl_usd": -525.18
+    },
+    "short_stats": {
+      "count": 202,
+      "pnl_usd": -201.74
+    },
+    "loss_clusters": [
+      {
+        "streak_length": 7,
+        "total_loss_usd": -59.99,
+        "start_time": "2026-07-28T03:11:12.750226+00:00",
+        "end_time": "2026-07-28T11:29:46.677568+00:00",
+        "symbols": [
+          "4USDT",
+          "LAUSDT",
+          "BANKUSDT",
+          "ONUSDT",
+          "AKEUSDT",
+          "CAPUSDT",
+          "XTZUSDT"
+        ],
+        "directional_bias": "HEAVY_LONG",
+        "long_ratio": 0.86
+      },
+      {
+        "streak_length": 7,
+        "total_loss_usd": -52.48,
+        "start_time": "2026-07-28T15:54:51.806872+00:00",
+        "end_time": "2026-07-29T08:09:14.729878+00:00",
+        "symbols": [
+          "COTIUSDT",
+          "ZILUSDT",
+          "MAVIAUSDT",
+          "ONTUSDT",
+          "ALGOUSDT",
+          "ZAMAUSDT",
+          "SOONUSDT"
+        ],
+        "directional_bias": "MIXED",
+        "long_ratio": 0.57
+      },
+      {
+        "streak_length": 7,
+        "total_loss_usd": -50.78,
+        "start_time": "2026-08-01T01:11:11.762362+00:00",
+        "end_time": "2026-08-01T14:51:14.032018+00:00",
+        "symbols": [
+          "GIGGLEUSDT",
+          "1000RATSUSDT",
+          "1000RATSUSDT",
+          "1000RATSUSDT",
+          "BABYUSDT",
+          "ENSOUSDT",
+          "DOTUSDT"
+        ],
+        "directional_bias": "MIXED",
+        "long_ratio": 0.71
+      },
+      {
+        "streak_length": 9,
+        "total_loss_usd": -48.43,
+        "start_time": "2026-07-26T12:36:32.199380+00:00",
+        "end_time": "2026-07-27T05:35:54.813116+00:00",
+        "symbols": [
+          "ESPORTSUSDT",
+          "ETHUSDT",
+          "EULUSDT",
+          "XMRUSDT",
+          "ETHUSDT",
+          "BCHUSDT",
+          "BANKUSDT",
+          "EULUSDT",
+          "BUSDT"
+        ],
+        "directional_bias": "MIXED",
+        "long_ratio": 0.56
+      },
+      {
+        "streak_length": 8,
+        "total_loss_usd": -47.34,
+        "start_time": "2026-08-25T04:26:12.742274+00:00",
+        "end_time": "2026-08-25T16:16:24.316922+00:00",
+        "symbols": [
+          "TACUSDT",
+          "TACUSDT",
+          "ONGUSDT",
+          "TACUSDT",
+          "VELVETUSDT",
+          "PUNDIXUSDT",
+          "POPCATUSDT",
+          "ONGUSDT"
+        ],
+        "directional_bias": "HEAVY_LONG",
+        "long_ratio": 0.88
+      }
+    ]
+  },
+  "channel_matrix": {
+    "UNKNOWN": {
+      "source_chat_id": "UNKNOWN",
+      "source_name": "UNKNOWN",
+      "trades": 97,
+      "wins": 33,
+      "losses": 64,
+      "win_rate_pct": 34.02,
+      "net_pnl_usd": -57.52,
+      "profit_factor": 0.37,
+      "grade": "RETIRE",
+      "action": "Unsubscribe / Blacklist"
+    },
+    "-1001652601224": {
+      "source_chat_id": "-1001652601224",
+      "source_name": "-1001652601224",
+      "trades": 77,
+      "wins": 28,
+      "losses": 49,
+      "win_rate_pct": 36.36,
+      "net_pnl_usd": -248.5,
+      "profit_factor": 0.38,
+      "grade": "RETIRE",
+      "action": "Unsubscribe / Blacklist"
+    },
+    "-1002264738008": {
+      "source_chat_id": "-1002264738008",
+      "source_name": "-1002264738008",
+      "trades": 11,
+      "wins": 3,
+      "losses": 8,
+      "win_rate_pct": 27.27,
+      "net_pnl_usd": -17.78,
+      "profit_factor": 0.36,
+      "grade": "RETIRE",
+      "action": "Unsubscribe / Blacklist"
+    },
+    "-1001161683441": {
+      "source_chat_id": "-1001161683441",
+      "source_name": "-1001161683441",
+      "trades": 27,
+      "wins": 10,
+      "losses": 17,
+      "win_rate_pct": 37.04,
+      "net_pnl_usd": -72.63,
+      "profit_factor": 0.28,
+      "grade": "RETIRE",
+      "action": "Unsubscribe / Blacklist"
+    },
+    "-1001553551852": {
+      "source_chat_id": "-1001553551852",
+      "source_name": "-1001553551852",
+      "trades": 38,
+      "wins": 21,
+      "losses": 17,
+      "win_rate_pct": 55.26,
+      "net_pnl_usd": -29.61,
+      "profit_factor": 0.54,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001721776885": {
+      "source_chat_id": "-1001721776885",
+      "source_name": "-1001721776885",
+      "trades": 1,
+      "wins": 1,
+      "losses": 0,
+      "win_rate_pct": 100.0,
+      "net_pnl_usd": 2.88,
+      "profit_factor": 99.0,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    },
+    "-1002030275921": {
+      "source_chat_id": "-1002030275921",
+      "source_name": "-1002030275921",
+      "trades": 13,
+      "wins": 5,
+      "losses": 8,
+      "win_rate_pct": 38.46,
+      "net_pnl_usd": -21.47,
+      "profit_factor": 0.53,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001622654998": {
+      "source_chat_id": "-1001622654998",
+      "source_name": "-1001622654998",
+      "trades": 65,
+      "wins": 32,
+      "losses": 33,
+      "win_rate_pct": 49.23,
+      "net_pnl_usd": -104.33,
+      "profit_factor": 0.24,
+      "grade": "RETIRE",
+      "action": "Unsubscribe / Blacklist"
+    },
+    "-1001754095061": {
+      "source_chat_id": "-1001754095061",
+      "source_name": "-1001754095061",
+      "trades": 30,
+      "wins": 16,
+      "losses": 14,
+      "win_rate_pct": 53.33,
+      "net_pnl_usd": -32.41,
+      "profit_factor": 0.43,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001590450482": {
+      "source_chat_id": "-1001590450482",
+      "source_name": "-1001590450482",
+      "trades": 8,
+      "wins": 5,
+      "losses": 3,
+      "win_rate_pct": 62.5,
+      "net_pnl_usd": -9.03,
+      "profit_factor": 0.54,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001982472141": {
+      "source_chat_id": "-1001982472141",
+      "source_name": "-1001982472141",
+      "trades": 22,
+      "wins": 14,
+      "losses": 8,
+      "win_rate_pct": 63.64,
+      "net_pnl_usd": -5.03,
+      "profit_factor": 0.89,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    },
+    "-1001078354109": {
+      "source_chat_id": "-1001078354109",
+      "source_name": "-1001078354109",
+      "trades": 4,
+      "wins": 0,
+      "losses": 4,
+      "win_rate_pct": 0.0,
+      "net_pnl_usd": -4.57,
+      "profit_factor": 0.0,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001594522150": {
+      "source_chat_id": "-1001594522150",
+      "source_name": "-1001594522150",
+      "trades": 4,
+      "wins": 2,
+      "losses": 2,
+      "win_rate_pct": 50.0,
+      "net_pnl_usd": 3.39,
+      "profit_factor": 1.37,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    },
+    "-1001700314832": {
+      "source_chat_id": "-1001700314832",
+      "source_name": "-1001700314832",
+      "trades": 14,
+      "wins": 1,
+      "losses": 13,
+      "win_rate_pct": 7.14,
+      "net_pnl_usd": -94.31,
+      "profit_factor": 0.05,
+      "grade": "RETIRE",
+      "action": "Unsubscribe / Blacklist"
+    },
+    "-1002097370390": {
+      "source_chat_id": "-1002097370390",
+      "source_name": "-1002097370390",
+      "trades": 11,
+      "wins": 6,
+      "losses": 5,
+      "win_rate_pct": 54.55,
+      "net_pnl_usd": -3.26,
+      "profit_factor": 0.86,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    },
+    "-1001855648946": {
+      "source_chat_id": "-1001855648946",
+      "source_name": "-1001855648946",
+      "trades": 5,
+      "wins": 1,
+      "losses": 4,
+      "win_rate_pct": 20.0,
+      "net_pnl_usd": -19.91,
+      "profit_factor": 0.19,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001959071837": {
+      "source_chat_id": "-1001959071837",
+      "source_name": "-1001959071837",
+      "trades": 4,
+      "wins": 1,
+      "losses": 3,
+      "win_rate_pct": 25.0,
+      "net_pnl_usd": -15.26,
+      "profit_factor": 0.16,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001317169843": {
+      "source_chat_id": "-1001317169843",
+      "source_name": "-1001317169843",
+      "trades": 8,
+      "wins": 2,
+      "losses": 6,
+      "win_rate_pct": 25.0,
+      "net_pnl_usd": -18.68,
+      "profit_factor": 0.44,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001727857237": {
+      "source_chat_id": "-1001727857237",
+      "source_name": "-1001727857237",
+      "trades": 30,
+      "wins": 19,
+      "losses": 11,
+      "win_rate_pct": 63.33,
+      "net_pnl_usd": -9.75,
+      "profit_factor": 0.73,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1002224539786": {
+      "source_chat_id": "-1002224539786",
+      "source_name": "-1002224539786",
+      "trades": 2,
+      "wins": 1,
+      "losses": 1,
+      "win_rate_pct": 50.0,
+      "net_pnl_usd": -4.97,
+      "profit_factor": 0.26,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001297561296": {
+      "source_chat_id": "-1001297561296",
+      "source_name": "-1001297561296",
+      "trades": 3,
+      "wins": 3,
+      "losses": 0,
+      "win_rate_pct": 100.0,
+      "net_pnl_usd": 14.44,
+      "profit_factor": 99.0,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    },
+    "-1001347728413": {
+      "source_chat_id": "-1001347728413",
+      "source_name": "-1001347728413",
+      "trades": 3,
+      "wins": 0,
+      "losses": 3,
+      "win_rate_pct": 0.0,
+      "net_pnl_usd": -6.23,
+      "profit_factor": 0.0,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001334826070": {
+      "source_chat_id": "-1001334826070",
+      "source_name": "-1001334826070",
+      "trades": 7,
+      "wins": 3,
+      "losses": 4,
+      "win_rate_pct": 42.86,
+      "net_pnl_usd": 10.61,
+      "profit_factor": 1.78,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    },
+    "-1002458566069": {
+      "source_chat_id": "-1002458566069",
+      "source_name": "-1002458566069",
+      "trades": 4,
+      "wins": 3,
+      "losses": 1,
+      "win_rate_pct": 75.0,
+      "net_pnl_usd": 14.49,
+      "profit_factor": 6.24,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    },
+    "-1002078531832": {
+      "source_chat_id": "-1002078531832",
+      "source_name": "-1002078531832",
+      "trades": 2,
+      "wins": 1,
+      "losses": 1,
+      "win_rate_pct": 50.0,
+      "net_pnl_usd": -0.84,
+      "profit_factor": 0.49,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1003934526446": {
+      "source_chat_id": "-1003934526446",
+      "source_name": "-1003934526446",
+      "trades": 6,
+      "wins": 4,
+      "losses": 2,
+      "win_rate_pct": 66.67,
+      "net_pnl_usd": 5.45,
+      "profit_factor": 3.42,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    },
+    "-1002817127218": {
+      "source_chat_id": "-1002817127218",
+      "source_name": "-1002817127218",
+      "trades": 2,
+      "wins": 0,
+      "losses": 2,
+      "win_rate_pct": 0.0,
+      "net_pnl_usd": -2.1,
+      "profit_factor": 0.0,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "AUTONOMOUS_SCANNER": {
+      "source_chat_id": "AUTONOMOUS_SCANNER",
+      "source_name": "AUTONOMOUS_SCANNER",
+      "trades": 4,
+      "wins": 0,
+      "losses": 0,
+      "win_rate_pct": 0.0,
+      "net_pnl_usd": 0.0,
+      "profit_factor": 0.0,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1001164308989": {
+      "source_chat_id": "-1001164308989",
+      "source_name": "-1001164308989",
+      "trades": 53,
+      "wins": 17,
+      "losses": 36,
+      "win_rate_pct": 32.08,
+      "net_pnl_usd": 13.67,
+      "profit_factor": 99.0,
+      "grade": "RETIRE",
+      "action": "Unsubscribe / Blacklist"
+    },
+    "-1001552004524": {
+      "source_chat_id": "-1001552004524",
+      "source_name": "-1001552004524",
+      "trades": 1,
+      "wins": 1,
+      "losses": 0,
+      "win_rate_pct": 100.0,
+      "net_pnl_usd": 1.25,
+      "profit_factor": 99.0,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    },
+    "-1001783301467": {
+      "source_chat_id": "-1001783301467",
+      "source_name": "-1001783301467",
+      "trades": 1,
+      "wins": 0,
+      "losses": 1,
+      "win_rate_pct": 0.0,
+      "net_pnl_usd": -0.06,
+      "profit_factor": 0.0,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1003185887764": {
+      "source_chat_id": "-1003185887764",
+      "source_name": "-1003185887764",
+      "trades": 80,
+      "wins": 51,
+      "losses": 29,
+      "win_rate_pct": 63.75,
+      "net_pnl_usd": 73.18,
+      "profit_factor": 99.0,
+      "grade": "LIVE",
+      "action": "Promote to Live"
+    },
+    "-1003801941007": {
+      "source_chat_id": "-1003801941007",
+      "source_name": "-1003801941007",
+      "trades": 251,
+      "wins": 102,
+      "losses": 149,
+      "win_rate_pct": 40.64,
+      "net_pnl_usd": 2.94,
+      "profit_factor": 99.0,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    },
+    "-1003988458515": {
+      "source_chat_id": "-1003988458515",
+      "source_name": "-1003988458515",
+      "trades": 11,
+      "wins": 6,
+      "losses": 5,
+      "win_rate_pct": 54.55,
+      "net_pnl_usd": -157.68,
+      "profit_factor": 0.0,
+      "grade": "RETIRE",
+      "action": "Unsubscribe / Blacklist"
+    },
+    "-1001935772577": {
+      "source_chat_id": "-1001935772577",
+      "source_name": "-1001935772577",
+      "trades": 2766,
+      "wins": 1542,
+      "losses": 1224,
+      "win_rate_pct": 55.75,
+      "net_pnl_usd": 406.53,
+      "profit_factor": 99.0,
+      "grade": "LIVE",
+      "action": "Promote to Live"
+    },
+    "-1001755199088": {
+      "source_chat_id": "-1001755199088",
+      "source_name": "-1001755199088",
+      "trades": 11,
+      "wins": 5,
+      "losses": 6,
+      "win_rate_pct": 45.45,
+      "net_pnl_usd": -1.37,
+      "profit_factor": 0.0,
+      "grade": "CALIBRATION",
+      "action": "Strict Calibration Mode"
+    },
+    "-1002011240015": {
+      "source_chat_id": "-1002011240015",
+      "source_name": "-1002011240015",
+      "trades": 45,
+      "wins": 32,
+      "losses": 13,
+      "win_rate_pct": 71.11,
+      "net_pnl_usd": 45.95,
+      "profit_factor": 99.0,
+      "grade": "LIVE",
+      "action": "Promote to Live"
+    },
+    "-1001561851861": {
+      "source_chat_id": "-1001561851861",
+      "source_name": "-1001561851861",
+      "trades": 69,
+      "wins": 59,
+      "losses": 10,
+      "win_rate_pct": 85.51,
+      "net_pnl_usd": 33.43,
+      "profit_factor": 99.0,
+      "grade": "LIVE",
+      "action": "Promote to Live"
+    },
+    "-1001756316676": {
+      "source_chat_id": "-1001756316676",
+      "source_name": "-1001756316676",
+      "trades": 70,
+      "wins": 49,
+      "losses": 21,
+      "win_rate_pct": 70.0,
+      "net_pnl_usd": 48.16,
+      "profit_factor": 99.0,
+      "grade": "LIVE",
+      "action": "Promote to Live"
+    },
+    "-1001784672307": {
+      "source_chat_id": "-1001784672307",
+      "source_name": "-1001784672307",
+      "trades": 159,
+      "wins": 82,
+      "losses": 77,
+      "win_rate_pct": 51.57,
+      "net_pnl_usd": 54.36,
+      "profit_factor": 99.0,
+      "grade": "LIVE",
+      "action": "Promote to Live"
+    },
+    "-1003003212033": {
+      "source_chat_id": "-1003003212033",
+      "source_name": "-1003003212033",
+      "trades": 5,
+      "wins": 2,
+      "losses": 3,
+      "win_rate_pct": 40.0,
+      "net_pnl_usd": 9.98,
+      "profit_factor": 99.0,
+      "grade": "WATCH",
+      "action": "Passive Observation"
+    }
+  },
+  "filter_simulation": {
+    "total_signals_analyzed": 500,
+    "path_a_legacy": {
+      "passed": 179,
+      "rejected": 321,
+      "pass_rate_pct": 35.8,
+      "top_rejection_reasons": [
+        [
+          "Adversarial Score Low (50.0 < 55.0)",
+          103
+        ],
+        [
+          "Adversarial Score Low (30.0 < 55.0)",
+          14
+        ],
+        [
+          "Adversarial Score Low (24.0 < 55.0)",
+          12
+        ],
+        [
+          "Adversarial Score Low (19.0 < 55.0)",
+          11
+        ],
+        [
+          "Adversarial Score Low (37.5 < 55.0)",
+          11
+        ],
+        [
+          "BTC Binary Veto (BULLISH)",
+          10
+        ],
+        [
+          "Adversarial Score Low (33.5 < 55.0)",
+          9
+        ],
+        [
+          "BTC Binary Veto (DUMP)",
+          9
+        ],
+        [
+          "Adversarial Score Low (45.0 < 55.0)",
+          8
+        ],
+        [
+          "Adversarial Score Low (22.0 < 55.0)",
+          7
+        ],
+        [
+          "Adversarial Score Low (26.5 < 55.0)",
+          7
+        ],
+        [
+          "Adversarial Score Low (49.5 < 55.0)",
+          6
+        ],
+        [
+          "Adversarial Score Low (21.0 < 55.0)",
+          6
+        ],
+        [
+          "Adversarial Score Low (50.5 < 55.0)",
+          6
+        ],
+        [
+          "Adversarial Score Low (48.5 < 55.0)",
+          6
+        ],
+        [
+          "Adversarial Score Low (45.5 < 55.0)",
+          6
+        ],
+        [
+          "Adversarial Score Low (26.0 < 55.0)",
+          5
+        ],
+        [
+          "Adversarial Score Low (43.5 < 55.0)",
+          5
+        ],
+        [
+          "Adversarial Score Low (18.0 < 55.0)",
+          5
+        ],
+        [
+          "Adversarial Score Low (23.0 < 55.0)",
+          5
+        ],
+        [
+          "Adversarial Score Low (40.0 < 55.0)",
+          5
+        ],
+        [
+          "BTC Binary Veto (PUMP)",
+          4
+        ],
+        [
+          "Adversarial Score Low (29.5 < 55.0)",
+          4
+        ],
+        [
+          "Adversarial Score Low (41.0 < 55.0)",
+          4
+        ],
+        [
+          "Adversarial Score Low (31.5 < 55.0)",
+          4
+        ],
+        [
+          "Adversarial Score Low (34.0 < 55.0)",
+          4
+        ],
+        [
+          "BTC Binary Veto (BEARISH)",
+          4
+        ],
+        [
+          "Adversarial Score Low (31.0 < 55.0)",
+          3
+        ],
+        [
+          "Adversarial Score Low (32.5 < 55.0)",
+          3
+        ],
+        [
+          "Adversarial Score Low (34.5 < 55.0)",
+          3
+        ],
+        [
+          "Adversarial Score Low (28.5 < 55.0)",
+          3
+        ],
+        [
+          "Adversarial Score Low (27.5 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (46.5 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (35.0 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (41.5 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (25.0 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (35.5 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (36.5 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (46.0 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (47.0 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (42.0 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (53.5 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (44.0 < 55.0)",
+          2
+        ],
+        [
+          "Adversarial Score Low (38.5 < 55.0)",
+          1
+        ],
+        [
+          "Adversarial Score Low (49.0 < 55.0)",
+          1
+        ],
+        [
+          "Adversarial Score Low (25.5 < 55.0)",
+          1
+        ],
+        [
+          "Adversarial Score Low (32.0 < 55.0)",
+          1
+        ],
+        [
+          "Adversarial Score Low (20.0 < 55.0)",
+          1
+        ]
+      ]
+    },
+    "path_b_resilience": {
+      "passed": 269,
+      "rejected": 231,
+      "pass_rate_pct": 53.8,
+      "top_rejection_reasons": [
+        [
+          "Toxic Channel Blacklist (-1001652601224)",
+          26
+        ],
+        [
+          "Adversarial Failed (avg=30.0<50 or min=10.0<30)",
+          12
+        ],
+        [
+          "Adversarial Failed (avg=24.0<50 or min=10.0<30)",
+          12
+        ],
+        [
+          "Adversarial Failed (avg=19.0<50 or min=10.0<30)",
+          11
+        ],
+        [
+          "Toxic Channel Blacklist (-1001161683441)",
+          10
+        ],
+        [
+          "Adversarial Failed (avg=37.5<50 or min=25.0<30)",
+          10
+        ],
+        [
+          "Adversarial Failed (avg=45.0<50 or min=40.0<30)",
+          8
+        ],
+        [
+          "Toxic Channel Blacklist (-1001164308989)",
+          8
+        ],
+        [
+          "Adversarial Failed (avg=22.0<50 or min=10.0<30)",
+          7
+        ],
+        [
+          "Adversarial Failed (avg=21.0<50 or min=10.0<30)",
+          6
+        ],
+        [
+          "Adversarial Failed (avg=45.5<50 or min=41.0<30)",
+          6
+        ],
+        [
+          "Adversarial Failed (avg=26.0<50 or min=10.0<30)",
+          5
+        ],
+        [
+          "Adversarial Failed (avg=43.5<50 or min=37.0<30)",
+          5
+        ],
+        [
+          "Adversarial Failed (avg=18.0<50 or min=10.0<30)",
+          5
+        ],
+        [
+          "Adversarial Failed (avg=50.5<50 or min=25.0<30)",
+          5
+        ],
+        [
+          "Adversarial Failed (avg=33.5<50 or min=10.0<30)",
+          5
+        ],
+        [
+          "Adversarial Failed (avg=23.0<50 or min=10.0<30)",
+          5
+        ],
+        [
+          "Adversarial Failed (avg=40.0<50 or min=30.0<30)",
+          5
+        ],
+        [
+          "Adversarial Failed (avg=29.5<50 or min=25.0<30)",
+          4
+        ],
+        [
+          "Adversarial Failed (avg=26.5<50 or min=25.0<30)",
+          4
+        ],
+        [
+          "Adversarial Failed (avg=31.0<50 or min=30.0<30)",
+          3
+        ],
+        [
+          "Adversarial Failed (avg=33.5<50 or min=25.0<30)",
+          3
+        ],
+        [
+          "Adversarial Failed (avg=49.5<50 or min=25.0<30)",
+          3
+        ],
+        [
+          "Adversarial Failed (avg=34.0<50 or min=10.0<30)",
+          3
+        ],
+        [
+          "Adversarial Failed (avg=26.5<50 or min=10.0<30)",
+          3
+        ],
+        [
+          "Adversarial Failed (avg=48.5<50 or min=25.0<30)",
+          3
+        ],
+        [
+          "Adversarial Failed (avg=28.5<50 or min=25.0<30)",
+          3
+        ],
+        [
+          "Adversarial Failed (avg=48.5<50 or min=47.0<30)",
+          3
+        ],
+        [
+          "Adversarial Failed (avg=49.5<50 or min=49.0<30)",
+          3
+        ],
+        [
+          "Adversarial Failed (avg=27.5<50 or min=10.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=32.5<50 or min=10.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=46.5<50 or min=43.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=35.0<50 or min=30.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=41.5<50 or min=10.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=31.5<50 or min=30.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=35.5<50 or min=10.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=46.0<50 or min=42.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=47.0<50 or min=44.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=41.0<50 or min=25.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=42.0<50 or min=25.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=44.0<50 or min=38.0<30)",
+          2
+        ],
+        [
+          "Adversarial Failed (avg=38.5<50 or min=30.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=32.5<50 or min=25.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=41.0<50 or min=10.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=25.0<50 or min=10.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=49.0<50 or min=25.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=36.5<50 or min=25.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=25.5<50 or min=10.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=32.0<50 or min=30.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=20.0<50 or min=10.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=31.5<50 or min=10.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=34.5<50 or min=10.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=30.0<50 or min=25.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=31.5<50 or min=25.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=34.0<50 or min=30.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=34.5<50 or min=25.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=34.5<50 or min=30.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=36.5<50 or min=30.0<30)",
+          1
+        ],
+        [
+          "Penalty Depleted Confluence (26.0 < 40.0)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=53.5<50 or min=25.0<30)",
+          1
+        ],
+        [
+          "Adversarial Failed (avg=33.5<50 or min=30.0<30)",
+          1
+        ],
+        [
+          "Penalty Depleted Confluence (32.0 < 40.0)",
+          1
+        ]
+      ]
+    },
+    "net_unblocked_signals": 125,
+    "toxic_prevented_signals": 35,
+    "sample_comparisons": [
+      {
+        "symbol": "BIRBUSDT",
+        "side": "LONG",
+        "channel": "-1002011240015",
+        "channel_grade": "LIVE",
+        "legacy_result": "PASS",
+        "resilience_result": "PASS",
+        "unblocked_by_resilience": false,
+        "protected_by_resilience": false
+      },
+      {
+        "symbol": "WOOUSDT",
+        "side": "SHORT",
+        "channel": "-1001935772577",
+        "channel_grade": "LIVE",
+        "legacy_result": "REJECT (Adversarial Score Low (26.0 < 55.0))",
+        "resilience_result": "REJECT (Adversarial Failed (avg=26.0<50 or min=10.0<30))",
+        "unblocked_by_resilience": false,
+        "protected_by_resilience": false
+      },
+      {
+        "symbol": "RLCUSDT",
+        "side": "LONG",
+        "channel": "-1001935772577",
+        "channel_grade": "LIVE",
+        "legacy_result": "REJECT (Adversarial Score Low (19.0 < 55.0))",
+        "resilience_result": "REJECT (Adversarial Failed (avg=19.0<50 or min=10.0<30))",
+        "unblocked_by_resilience": false,
+        "protected_by_resilience": false
+      },
+      {
+        "symbol": "YGGUSDT",
+        "side": "SHORT",
+        "channel": "-1001935772577",
+        "channel_grade": "LIVE",
+        "legacy_result": "REJECT (Adversarial Score Low (31.0 < 55.0))",
+        "resilience_result": "REJECT (Adversarial Failed (avg=31.0<50 or min=30.0<30))",
+        "unblocked_by_resilience": false,
+        "protected_by_resilience": false
+      },
+      {
+        "symbol": "ASTRUSDT",
+        "side": "SHORT",
+        "channel": "-1001935772577",
+        "channel_grade": "LIVE",
+        "legacy_result": "REJECT (Adversarial Score Low (43.5 < 55.0))",
+        "resilience_result": "REJECT (Adversarial Failed (avg=43.5<50 or min=37.0<30))",
+        "unblocked_by_resilience": false,
+        "protected_by_resilience": false
+      },
+      {
+        "symbol": "MUSDT",
+        "side": "LONG",
+        "channel": "-1001161683441",
+        "channel_grade": "RETIRE",
+        "legacy_result": "PASS",
+        "resilience_result": "REJECT (Toxic Channel Blacklist (-1001161683441))",
+        "unblocked_by_resilience": false,
+        "protected_by_resilience": true
+      },
+      {
+        "symbol": "ALGOUSDT",
+        "side": "LONG",
+        "channel": "-1001756316676",
+        "channel_grade": "LIVE",
+        "legacy_result": "REJECT (Adversarial Score Low (27.5 < 55.0))",
+        "resilience_result": "REJECT (Adversarial Failed (avg=27.5<50 or min=10.0<30))",
+        "unblocked_by_resilience": false,
+        "protected_by_resilience": false
+      },
+      {
+        "symbol": "DASHUSDT",
+        "side": "SHORT",
+        "channel": "-1001754095061",
+        "channel_grade": "CALIBRATION",
+        "legacy_result": "PASS",
+        "resilience_result": "PASS",
+        "unblocked_by_resilience": false,
+        "protected_by_resilience": false
+      },
+      {
+        "symbol": "RLCUSDT",
+        "side": "LONG",
+        "channel": "-1001553551852",
+        "channel_grade": "CALIBRATION",
+        "legacy_result": "REJECT (Adversarial Score Low (22.0 < 55.0))",
+        "resilience_result": "REJECT (Adversarial Failed (avg=22.0<50 or min=10.0<30))",
+        "unblocked_by_resilience": false,
+        "protected_by_resilience": false
+      },
+      {
+        "symbol": "BATUSDT",
+        "side": "SHORT",
+        "channel": "-1001935772577",
+        "channel_grade": "LIVE",
+        "legacy_result": "REJECT (Adversarial Score Low (50.0 < 55.0))",
+        "resilience_result": "PASS",
+        "unblocked_by_resilience": true,
+        "protected_by_resilience": false
+      }
+    ]
+  }
+}
