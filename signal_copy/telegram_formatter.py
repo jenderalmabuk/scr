@@ -615,10 +615,22 @@ def build_close_message(payload: Dict[str, Any]) -> str:
     else:
         title = f"{header_icon} <b>CLOSE</b> {icon} {side} {symbol}"
 
+    signal_entry = _safe_float(payload, "signal_entry_price", "plan_entry", default=0.0)
+    actual_entry = _safe_float(payload, "entry_price", default=0.0)
+    entry_line = f"💰 Entry: {format_price(actual_entry)}"
+    if signal_entry > 0 and abs(signal_entry - actual_entry) / signal_entry > 0.0005:
+        drift_pct = (actual_entry - signal_entry) / signal_entry * 100.0
+        entry_line += f" (Plan: {format_price(signal_entry)} | {drift_pct:+.2f}%)"
+
+    exit_line = f"💰 Exit: {format_price(exit_price)}"
+    if active_stop > 0 and "SL" in normalized_reason.upper():
+        slip_pct = abs(exit_price - active_stop) / active_stop * 100.0
+        exit_line += f" (Stop: {format_price(active_stop)} | Slip: {slip_pct:+.2f}%)"
+
     lines = [
         title,
-        f"💰 Entry: {format_price(_safe_float(payload, 'entry_price', default=0.0))}",
-        f"💰 Exit: {format_price(exit_price)}",
+        entry_line,
+        exit_line,
         f"📦 Qty: {_safe_float(payload, 'qty', default=0.0):.8g}",
         f"📊 PnL: <b>{pnl_pct:+.2f}%</b> (${pnl_amount:+.2f})",
         f"⏱️ Hold: {hold_minutes:.1f} min",

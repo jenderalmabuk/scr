@@ -1970,6 +1970,7 @@ class PaperMainnetTrader:
             asyncio.create_task(self._notify_close({
                 "symbol": symbol, "side": side, "reason": reason,
                 "entry_price": entry, "qty": qty,
+                "signal_entry_price": pos.get("signal_entry_price", entry),
                 "notional_usd": float(pos.get("notional", notional)), "rr": rr,
                 "normalized_reason": reason, "exit_price": actual_exit,
                 "gross_pnl_usd": gross_pnl, "fee_usd": entry_fee + exit_fee,
