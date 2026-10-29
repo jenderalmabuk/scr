@@ -87,7 +87,24 @@ class TestProvenanceLifecycle(unittest.TestCase):
         })
         self.patch_env.start()
 
+        import utils.persistence_paths
+        import execution.trade_journal
+        import execution.paper_mainnet_trader
+        self.patchers = [
+            patch.object(utils.persistence_paths, "JOURNAL_DIR", self.journal_dir),
+            patch.object(utils.persistence_paths, "TRADE_HISTORY_JSON_PATH", self.journal_dir / "trade_history.json"),
+            patch.object(utils.persistence_paths, "TRADE_HISTORY_CSV_PATH", self.journal_dir / "trade_history.csv"),
+            patch.object(execution.trade_journal, "JOURNAL_DIR", self.journal_dir),
+            patch.object(execution.paper_mainnet_trader, "PAPER_STATE_PATH", Path(self.temp_dir) / "open_positions.json"),
+            patch.object(execution.paper_mainnet_trader, "PAPER_EQUITY_PATH", Path(self.temp_dir) / "paper_equity.json"),
+        ]
+        for p in self.patchers:
+            p.start()
+
     def tearDown(self):
+        if hasattr(self, "patchers"):
+            for p in reversed(self.patchers):
+                p.stop()
         self.patch_env.stop()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 

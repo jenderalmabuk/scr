@@ -1,4 +1,7 @@
-import pytest
+try:
+    import pytest
+except ImportError:
+    pytest = None
 from execution.bybit_mainnet_trader import BybitMainnetTrader
 
 

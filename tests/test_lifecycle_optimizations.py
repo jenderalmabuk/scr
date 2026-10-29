@@ -2,7 +2,10 @@ import asyncio
 import os
 import sys
 import types
-import pytest
+try:
+    import pytest
+except ImportError:
+    pytest = None
 
 from execution.bybit_mainnet_trader import BybitMainnetTrader
 from execution.smart_scratch_exit import (

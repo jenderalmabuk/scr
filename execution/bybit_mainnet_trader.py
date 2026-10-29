@@ -673,6 +673,7 @@ class BybitMainnetTrader:
                 except Exception as tp_err:
                     logger.warning(f"[BYBIT_MAINNET] Error constructing 3-tier TP ladder for {symbol}: {tp_err}")
 
+            signal_metadata = dict(signal_metadata or {})
             pos_id = str(
                 signal_metadata.get("position_id")
                 or f"pos_{symbol.lower()}_{int(now.timestamp())}_{uuid.uuid4().hex[:6]}"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -1145,9 +1146,13 @@ def _flatten_trade_for_csv(normalized: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class TradeJournalWriter:
-    def __init__(self, out_dir: str = "journal"):
-        requested_dir = Path(out_dir)
-        self.out_dir = JOURNAL_DIR if requested_dir == Path("journal") else requested_dir
+    def __init__(self, out_dir: Optional[str | Path] = None):
+        if out_dir is not None and str(out_dir) != "journal":
+            self.out_dir = Path(out_dir)
+        elif os.environ.get("BOT_JOURNAL_DIR"):
+            self.out_dir = Path(os.environ["BOT_JOURNAL_DIR"])
+        else:
+            self.out_dir = JOURNAL_DIR
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.queue: asyncio.Queue = asyncio.Queue()
         self._task: Optional[asyncio.Task] = None
