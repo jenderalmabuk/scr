@@ -17,7 +17,7 @@ Paper fills include configurable adverse slippage and taker fees. This remains a
 simulation; exchange-native protective orders are required before real money.
 """
 from __future__ import annotations
-import asyncio, json, logging, os
+import asyncio, json, logging, os, uuid
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1068,8 +1068,39 @@ class PaperMainnetTrader:
             risk_pct=float(os.getenv("SIGNAL_COPY_RISK_PCT", "0.01")), opened_at=opened_at)
         router_plan["experiment_epoch"] = datetime.now(UTC).isoformat()
         router_plan["collection_mode"] = "shadow_only"
+
+        pos_id = str(params.get("position_id") or f"pos_{symbol.lower()}_{int(opened_at.timestamp())}_{uuid.uuid4().hex[:6]}")
+        intent_id = str(params.get("intent_id") or "")
+        order_id = str(params.get("order_id") or f"ord_{symbol.lower()}_{int(opened_at.timestamp())}")
+        signal_id = str(params.get("signal_id") or _adv_snapshot.get("signal_id") or params.get("tag") or "")
+        source = str(params.get("source") or "UNKNOWN")
+        strategy = str(params.get("strategy") or _adv_snapshot.get("strategy") or "UNKNOWN")
+        signal_entry_price = float(params.get("signal_entry_price", requested_entry or fill))
+        fill_entry_price = float(fill)
+        raw_sl_price = float(params.get("raw_sl_price", sl_price))
+        active_sl_price = float(sl_price)
+        target_risk_usd = float(_adv_snapshot.get("target_risk_usd") or params.get("target_risk_usd") or params.get("planned_risk_amount") or 2.0)
+        actual_risk_usd = float(max_loss_at_fill)
+        qty_opened = float(qty)
         
         self.positions[symbol] = {
+            "schema_version": 1,
+            "mode": "PAPER",
+            "position_id": pos_id,
+            "intent_id": intent_id,
+            "order_id": order_id,
+            "signal_id": signal_id,
+            "source": source,
+            "strategy": strategy,
+            "signal_entry_price": signal_entry_price,
+            "fill_entry_price": fill_entry_price,
+            "raw_sl_price": raw_sl_price,
+            "active_sl_price": active_sl_price,
+            "target_risk_usd": target_risk_usd,
+            "actual_risk_usd": actual_risk_usd,
+            "qty_opened": qty_opened,
+            "qty_closed": 0.0,
+            "qty_remaining": qty_opened,
             "symbol": symbol, "side": side, "entry_price": fill,
             "sl_price": sl_price, "provider_sl_original": sl_price,
             "tp1_price": tp1, "tp_ladder": tp_ladder,
@@ -1090,7 +1121,8 @@ class PaperMainnetTrader:
             "score": float(params.get("score", 0) or 0),
             "confidence": float(params.get("confidence", 0) or 0),
             "tag": str(params.get("tag", "")),
-            "source": str(params.get("source", "")),
+            "source": source,
+            "strategy": strategy,
             "tp_plan": str(params.get("tp_plan") or _adv_snapshot.get("tp_plan") or ""), 
         }
         _persist_positions(self.positions)
@@ -1098,6 +1130,7 @@ class PaperMainnetTrader:
         logger.info("[PAPER] OPEN %s %s @ %.6g (%s) | SL %.6g TP1 %.6g | $%.0f | fee %.4f",
                     side, symbol, fill, "limit" if raw_fill == requested_entry else "mainnet mark", sl_price, tp1, notional, entry_fee)
         return {"success": True, "ok": True, "symbol": symbol, "side": side,
+                "position_id": pos_id, "order_id": order_id,
                 "entry_price": fill, "raw_entry_price": raw_fill, "qty": qty,
                 "notional": notional, "entry_fee": entry_fee,
                 "max_loss_usd_at_fill": max_loss_at_fill, "equity": equity_after_entry}
@@ -1670,6 +1703,10 @@ class PaperMainnetTrader:
         rr = abs(actual_exit - float(entry)) / risk_per_unit if risk_per_unit else 0.0
         ladder = pos.get("tp_ladder") or []
         next_index = int(pos.get("next_tp_index", 0))
+        cur_initial = float(pos.get("qty_opened", pos.get("initial_qty", qty)))
+        pos["qty_remaining"] = float(pos.get("qty", 0.0))
+        pos["qty_closed"] = max(0.0, cur_initial - pos["qty_remaining"])
+        pos["active_sl_price"] = float(pos.get("sl_price", 0.0))
         pos.setdefault("fill_ledger", []).append({
             "timestamp": datetime.now(UTC).isoformat(), "kind": "TP_PARTIAL", "reason": reason,
             "entry_price": entry, "exit_price": actual_exit, "qty": qty,
@@ -1756,9 +1793,16 @@ class PaperMainnetTrader:
             bad_signal_shadow, baseline_total, best_shadow_net_pnl)
         pnl_pct = realized_net_pnl / max(float(pos.get("notional", notional)), 1e-9) * 100
         hold_min = (datetime.now(UTC) - pos["opened_at"]).total_seconds() / 60
-        original_sl = float(pos.get("provider_sl_original", pos.get("sl_price", entry)))
+        original_sl = float(pos.get("raw_sl_price", pos.get("provider_sl_original", pos.get("sl_price", entry))))
         risk_per_unit = abs(float(entry) - original_sl)
         rr = abs(actual_exit - float(entry)) / risk_per_unit if risk_per_unit else 0.0
+        cur_initial = float(pos.get("qty_opened", pos.get("initial_qty", qty)))
+        pos["qty_remaining"] = 0.0
+        pos["qty_closed"] = cur_initial
+        actual_rr_ladder = [
+            round(abs(float(tp) - float(entry)) / risk_per_unit, 3)
+            for tp in (pos.get("tp_ladder") or [])
+        ] if risk_per_unit > 0 else []
         pos.setdefault("fill_ledger", []).append({
             "timestamp": datetime.now(UTC).isoformat(), "kind": "FINAL", "reason": reason,
             "entry_price": entry, "exit_price": actual_exit, "qty": qty,
@@ -1808,6 +1852,24 @@ class PaperMainnetTrader:
                 logger.warning("[SHADOW_TRAIL] journal failed for %s: %s", symbol, e)
         if self._journal:
             await self._journal.write_trade({
+                "schema_version": int(pos.get("schema_version", 1)),
+                "mode": str(pos.get("mode", "PAPER")),
+                "source": str(pos.get("source", "UNKNOWN")),
+                "strategy": str(pos.get("strategy", (pos.get("adv_snapshot") or {}).get("strategy", "UNKNOWN"))),
+                "signal_id": str(pos.get("signal_id", "")),
+                "intent_id": str(pos.get("intent_id", "")),
+                "order_id": str(pos.get("order_id", "")),
+                "position_id": str(pos.get("position_id", "")),
+                "signal_entry_price": float(pos.get("signal_entry_price", entry)),
+                "fill_entry_price": float(pos.get("fill_entry_price", entry)),
+                "raw_sl_price": float(pos.get("raw_sl_price", original_sl)),
+                "active_sl_price": float(pos.get("sl_price", original_sl)),
+                "target_risk_usd": float(pos.get("target_risk_usd", (pos.get("adv_snapshot") or {}).get("target_risk_usd", 2.0))),
+                "actual_risk_usd": float(pos.get("actual_risk_usd", pos.get("max_loss_usd_at_fill", 0.0))),
+                "actual_rr_ladder": actual_rr_ladder,
+                "qty_opened": cur_initial,
+                "qty_closed": cur_initial,
+                "qty_remaining": 0.0,
                 "timestamp_open": pos["opened_at"].isoformat(),
                 "timestamp_close": datetime.now(UTC).isoformat(),
                 "symbol": symbol, "side": side,
