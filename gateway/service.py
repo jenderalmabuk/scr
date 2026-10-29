@@ -131,6 +131,15 @@ class ExecutionGateway:
             res.reason = f"max running positions reached ({max_running})"
             return self._record(intent, res)
 
+        # Correlation Guard: Limit directional exposure to prevent Cluster Death
+        max_directional = int(os.getenv("GATEWAY_MAX_DIRECTIONAL_POSITIONS", "2"))
+        if max_directional > 0 and hasattr(self.trader, "positions"):
+            current_positions = getattr(self.trader, "positions", {}) or {}
+            same_dir_count = sum(1 for p in current_positions.values() if str(p.get("side", "")).upper() == side)
+            if same_dir_count >= max_directional:
+                res.reason = f"MAX_DIRECTIONAL_EXPOSURE_{side} (current={same_dir_count}, max={max_directional})"
+                return self._record(intent, res)
+
         # A previously validated pending limit may fill later. Do not apply
         # entry-arrival cooldowns again; running-position cap still applies.
         pending_fill = str(intent.tag).startswith("fusion_quantum_pending_")
@@ -353,6 +362,15 @@ class ExecutionGateway:
         risk_cap_usd = max(0.0, _safe_float(os.getenv("SIGNALCOPY_RISK_PER_TRADE_USD"), 2.0))
         if risk_cap_usd <= 0:
             return 0.0, 0.0, "SIGNALCOPY_RISK_PER_TRADE_USD must be greater than zero"
+
+        # Adaptive Sizing during Drawdown (Anti-Deadlock)
+        start_balance = float(os.getenv("STARTING_BALANCE", "100.0"))
+        if start_balance > 0 and equity < start_balance:
+            drawdown_pct = (1.0 - (equity / start_balance)) * 100.0
+            if drawdown_pct >= 20.0:
+                risk_cap_usd = min(risk_cap_usd, 0.50)
+            elif drawdown_pct >= 10.0:
+                risk_cap_usd = min(risk_cap_usd, 1.00)
 
         # Leveraged futures position sizing cap:
         # Allow position leverage up to GATEWAY_MAX_POSITION_LEVERAGE (default 3.5x equity, max $350)
