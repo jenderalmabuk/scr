@@ -121,6 +121,58 @@ def verify_rejected_intents_journal(path: Path) -> tuple[bool, int, str]:
     return True, count, "chain_valid"
 
 
+def recover_journal_after_crash(path: Path) -> tuple[bool, int, str]:
+    """Audit and recover journal after unexpected crash/power-loss.
+    If the very last line of the file is partially written (incomplete JSON/EOF),
+    safely truncate back to the last valid newline, restoring journal validity.
+    If corruption is inside the file (not the tail), refuse to repair (flags tampering).
+    """
+    if not path.exists():
+        return True, 0, "file_not_found"
+    valid, count, msg = verify_rejected_intents_journal(path)
+    if valid:
+        return True, count, "journal_already_clean_valid"
+    try:
+        with path.open("rb") as f:
+            raw_content = f.read()
+        lines = raw_content.split(b"\n")
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if not lines:
+            return False, 0, "empty_or_whitespace_only"
+        test_lines = lines[:-1]
+        prev_hash = "0" * 64
+        valid_count = 0
+        all_prior_valid = True
+        for l in test_lines:
+            line_str = l.decode("utf-8", errors="replace").strip()
+            if not line_str:
+                continue
+            try:
+                rec = json.loads(line_str)
+            except Exception:
+                all_prior_valid = False
+                break
+            if rec.get("previous_event_hash") != prev_hash:
+                all_prior_valid = False
+                break
+            data_copy = {k: v for k, v in rec.items() if k != "event_hash"}
+            expected_h = _compute_event_hash(prev_hash, data_copy)
+            if rec.get("event_hash") != expected_h:
+                all_prior_valid = False
+                break
+            prev_hash = rec.get("event_hash")
+            valid_count += 1
+        if all_prior_valid:
+            repaired_content = b"\n".join(test_lines) + (b"\n" if test_lines else b"")
+            path.write_bytes(repaired_content)
+            return True, valid_count, f"recovered_crash_truncated_partial_final_line (restored {valid_count} valid records)"
+        else:
+            return False, 0, "unrecoverable_tamper_detected_prior_to_tail: " + str(msg)
+    except Exception as exc:
+        return False, 0, f"recovery_failed_exception: {exc}"
+
+
 def trader_rejected(response) -> bool:
     """Normalize bool/dict trader contracts into one rejection decision."""
     return not response or (
@@ -722,11 +774,6 @@ class ExecutionGateway:
     def _append_rejected_intent(self, intent: OrderIntent, res: GatewayResult) -> None:
         try:
             intent_id = str(intent.intent_id or "")
-            if intent_id and intent_id in self._seen_rejected_intent_ids:
-                logger.debug("[GATEWAY] duplicate rejected intent_id %s suppressed from journal", intent_id)
-                return
-            if intent_id:
-                self._seen_rejected_intent_ids.add(intent_id)
 
             REJECTED_INTENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
             snapshot = dict(intent.adv_snapshot or {})
@@ -742,13 +789,8 @@ class ExecutionGateway:
             now_iso = datetime.now(timezone.utc).isoformat()
             regime_observed = snapshot.get("regime_observed_at") or snapshot.get("price_observed_at") or now_iso
             sig_id = getattr(intent, "signal_id", None) or snapshot.get("signal_id") or getattr(intent, "tag", None) or getattr(intent, "intent_id", "")
-            
-            # Fetch previous event hash for blockchain-style hash chaining
-            if self._last_reject_event_hash is None:
-                self._last_reject_event_hash = self._get_last_reject_hash_from_disk()
-            prev_hash = self._last_reject_event_hash
 
-            payload = {
+            payload_base = {
                 "schema_version": 2,
                 "signal_id": str(sig_id or ""),
                 "intent_id": intent_id,
@@ -772,18 +814,40 @@ class ExecutionGateway:
                 },
                 "config_hash": _get_active_config_hash(),
                 "code_hash": _get_active_code_hash(),
-                "previous_event_hash": prev_hash,
             }
 
-            event_hash = _compute_event_hash(prev_hash, payload)
-            payload["event_hash"] = event_hash
-            self._last_reject_event_hash = event_hash
-
-            # Durable Append with explicit fcntl.flock, flush, and fsync
-            with REJECTED_INTENTS_PATH.open("a", encoding="utf-8") as f:
+            # Atomic Durable Append under Exclusive File Lock (prevents forks across concurrent workers)
+            with REJECTED_INTENTS_PATH.open("a+", encoding="utf-8") as f:
                 if fcntl is not None:
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 try:
+                    if intent_id and intent_id in self._seen_rejected_intent_ids:
+                        logger.debug("[GATEWAY] duplicate rejected intent_id %s suppressed from journal", intent_id)
+                        return
+                    if intent_id:
+                        self._seen_rejected_intent_ids.add(intent_id)
+
+                    # Read latest tip under lock to guarantee unbroken monotonic hash chain
+                    f.seek(0)
+                    last_line = ""
+                    for line in f:
+                        if line.strip():
+                            last_line = line.strip()
+                    prev_hash = "0" * 64
+                    if last_line:
+                        try:
+                            rec = json.loads(last_line)
+                            prev_hash = str(rec.get("event_hash") or ("0" * 64))
+                        except Exception:
+                            prev_hash = self._last_reject_event_hash or ("0" * 64)
+
+                    payload = dict(payload_base)
+                    payload["previous_event_hash"] = prev_hash
+                    event_hash = _compute_event_hash(prev_hash, payload)
+                    payload["event_hash"] = event_hash
+                    self._last_reject_event_hash = event_hash
+
+                    f.seek(0, 2)
                     f.write(json.dumps(payload, default=str, separators=(",", ":")) + "\n")
                     f.flush()
                     os.fsync(f.fileno())
