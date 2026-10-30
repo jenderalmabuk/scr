@@ -28,6 +28,10 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 from typing import Any, Dict, List, Optional
 
 from gateway.order_intent import OrderIntent
@@ -53,7 +57,7 @@ def _get_active_config_hash() -> str:
     keys = [
         "SIGNALCOPY_RISK_PER_TRADE_USD", "STARTING_BALANCE", "MAX_ENTRY_DEVIATION_PCT",
         "MIN_ENTRY_SL_DISTANCE_PCT", "SYMBOL_HARD_SL_COOLDOWN_SEC", "GATEWAY_BTC_REGIME_REVALIDATE",
-        "GATEWAY_MAX_DIRECTIONAL_POSITIONS", "GATEWAY_MAX_POSITION_LEVERAGE"
+        "GATEWAY_MAX_DIRECTIONAL_POSITIONS", "GATEWAY_MAX_POSITION_LEVERAGE", "RISK_OVERRUN_TOLERANCE_USD"
     ]
     blob = "|".join(f"{k}={os.getenv(k, '')}" for k in sorted(keys))
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
@@ -180,6 +184,7 @@ class ExecutionGateway:
         self._symbol_sl_times: Dict[str, float] = {}
         self._seen_rejected_intent_ids: set = set()
         self._last_reject_event_hash: Optional[str] = None
+        self._rebuild_seen_rejected_intents()
 
     # ── public API ───────────────────────────────────────────
 
@@ -671,6 +676,33 @@ class ExecutionGateway:
             self._append_rejected_intent(intent, res)
         return res
 
+    def _rebuild_seen_rejected_intents(self) -> None:
+        """Scan rejected_intents journal on startup to rebuild seen intent IDs and last tip hash."""
+        self._seen_rejected_intent_ids = set()
+        self._last_reject_event_hash = "0" * 64
+        if not REJECTED_INTENTS_PATH.exists():
+            return
+        try:
+            with REJECTED_INTENTS_PATH.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        iid = rec.get("intent_id")
+                        if iid:
+                            self._seen_rejected_intent_ids.add(str(iid))
+                        eh = rec.get("event_hash")
+                        if eh:
+                            self._last_reject_event_hash = str(eh)
+                    except Exception:
+                        continue
+            logger.info("[GATEWAY] rebuilt %d seen rejected intent IDs from journal (tip=%s)",
+                        len(self._seen_rejected_intent_ids), (self._last_reject_event_hash or "")[:8])
+        except Exception as exc:
+            logger.warning("[GATEWAY] failed to rebuild seen rejected intents: %s", exc)
+
     def _get_last_reject_hash_from_disk(self) -> str:
         if not REJECTED_INTENTS_PATH.exists():
             return "0" * 64
@@ -747,10 +779,16 @@ class ExecutionGateway:
             payload["event_hash"] = event_hash
             self._last_reject_event_hash = event_hash
 
-            # Durable Append with explicit flush and fsync
+            # Durable Append with explicit fcntl.flock, flush, and fsync
             with REJECTED_INTENTS_PATH.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, default=str, separators=(",", ":")) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
+                if fcntl is not None:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.write(json.dumps(payload, default=str, separators=(",", ":")) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except Exception as exc:
             logger.warning("[GATEWAY] failed to append rejected intent: %s", exc)

@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 
 from gateway.order_intent import OrderIntent
 from gateway.service import ExecutionGateway, _classify_reject_layer, verify_rejected_intents_journal, _compute_event_hash
-from execution.paper_mainnet_trader import PaperMainnetTrader
+from execution.paper_mainnet_trader import PaperMainnetTrader, RISK_OVERRUN_TOLERANCE_USD
+from scripts.replay_rejected_intents import run_replay
 
 
 class TestScoreInvarianceAndNetRisk(unittest.TestCase):
@@ -190,6 +191,141 @@ class TestScoreInvarianceAndNetRisk(unittest.TestCase):
                 gw._append_rejected_intent(intent, res)
                 lines_2 = [l for l in tmp_path.read_text(encoding="utf-8").splitlines() if l.strip()]
                 self.assertEqual(len(lines_2), 1)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+    def test_risk_overrun_tolerance_and_pnl_signs(self):
+        """Verify explicit PnL sign edge cases for risk overrun evaluation."""
+        planned_max_loss = 2.00
+        tolerance_usd = RISK_OVERRUN_TOLERANCE_USD  # default 0.05
+
+        def compute_overrun(net_pnl: float) -> float:
+            actual_loss = max(0.0, -net_pnl)
+            return max(0.0, actual_loss - (planned_max_loss + tolerance_usd))
+
+        # 1. PnL -1.00 -> no overrun
+        self.assertEqual(compute_overrun(-1.00), 0.0)
+
+        # 2. PnL -2.04 -> no overrun
+        self.assertEqual(compute_overrun(-2.04), 0.0)
+
+        # 3. PnL -2.06 -> overrun of $0.01
+        self.assertAlmostEqual(compute_overrun(-2.06), 0.01, places=6)
+
+        # 4. PnL +1.00 -> no overrun
+        self.assertEqual(compute_overrun(1.00), 0.0)
+
+    def test_gateway_restart_rebuilds_dedup_and_tip_hash(self):
+        """Verify that on restart, ExecutionGateway preloads seen intent IDs and last hash."""
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tmp:
+            tmp_path = Path(tmp.name)
+
+        try:
+            # Seed 2 historical records
+            prev = "0" * 64
+            records = []
+            for i in range(2):
+                payload = {
+                    "schema_version": 2,
+                    "intent_id": f"restart_intent_{i}",
+                    "symbol": "BTCUSDT",
+                    "previous_event_hash": prev,
+                }
+                h = _compute_event_hash(prev, payload)
+                payload["event_hash"] = h
+                records.append(payload)
+                prev = h
+            tmp_path.write_text(
+                "\n".join(json.dumps(r, separators=(",", ":")) for r in records) + "\n",
+                encoding="utf-8",
+            )
+
+            # Re-instantiate gateway (simulating daemon restart)
+            with patch("gateway.service.REJECTED_INTENTS_PATH", tmp_path):
+                mock_risk_mgr = MagicMock()
+                mock_trader = MagicMock()
+                gw = ExecutionGateway(risk_mgr=mock_risk_mgr, trader=mock_trader)
+
+                # Assert seen intent IDs were reconstructed
+                self.assertIn("restart_intent_0", gw._seen_rejected_intent_ids)
+                self.assertIn("restart_intent_1", gw._seen_rejected_intent_ids)
+                self.assertEqual(gw._last_reject_event_hash, records[1]["event_hash"])
+
+                # Submitting an existing intent is suppressed
+                dup_intent = OrderIntent(
+                    intent_id="restart_intent_1",
+                    source="SIGNAL_COPY",
+                    symbol="BTCUSDT",
+                    side="LONG",
+                    entry_price=50000.0,
+                    sl_price=49000.0,
+                )
+                from gateway.service import GatewayResult
+                gw._append_rejected_intent(dup_intent, GatewayResult(ok=False, reason="REGIME_REJECT"))
+                lines_after_dup = [l for l in tmp_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+                self.assertEqual(len(lines_after_dup), 2)
+
+                # Submitting a new intent appends correctly with continuous hash chain
+                new_intent = OrderIntent(
+                    intent_id="restart_intent_2",
+                    source="SIGNAL_COPY",
+                    symbol="ETHUSDT",
+                    side="SHORT",
+                    entry_price=3000.0,
+                    sl_price=3100.0,
+                )
+                gw._append_rejected_intent(new_intent, GatewayResult(ok=False, reason="REGIME_REJECT"))
+                lines_after_new = [l for l in tmp_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+                self.assertEqual(len(lines_after_new), 3)
+
+                # Verify chain integrity
+                valid, count, msg = verify_rejected_intents_journal(tmp_path)
+                self.assertTrue(valid, msg)
+                self.assertEqual(count, 3)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+    def test_replay_audit_determinism(self):
+        """Verify that consecutive replay audits produce bit-for-bit identical hashes and metrics."""
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tmp:
+            tmp_path = Path(tmp.name)
+
+        try:
+            prev = "0" * 64
+            records = []
+            for i in range(3):
+                payload = {
+                    "schema_version": 2,
+                    "intent_id": f"det_intent_{i}",
+                    "symbol": "BTCUSDT",
+                    "side": "LONG",
+                    "entry": 50000.0,
+                    "sl": 49000.0,
+                    "tp": [52000.0],
+                    "previous_event_hash": prev,
+                }
+                h = _compute_event_hash(prev, payload)
+                payload["event_hash"] = h
+                records.append(payload)
+                prev = h
+            tmp_path.write_text(
+                "\n".join(json.dumps(r, separators=(",", ":")) for r in records) + "\n",
+                encoding="utf-8",
+            )
+
+            # Back-to-back replay runs
+            res1 = run_replay(tmp_path)
+            res2 = run_replay(tmp_path)
+
+            self.assertEqual(res1["output_hash"], res2["output_hash"])
+            for metric in [
+                "input_count", "resolved_count", "unknown_count", "would_have_won",
+                "would_have_lost", "gross_pnl", "fees", "funding", "slippage",
+                "net_pnl", "loss_avoided", "profit_missed", "net_gate_benefit"
+            ]:
+                self.assertEqual(res1[metric], res2[metric])
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()

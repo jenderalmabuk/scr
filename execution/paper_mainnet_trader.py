@@ -29,6 +29,7 @@ from execution.smart_scratch_exit import calculate_smart_scratch_timeout, evalua
 # Trailing stop execution config
 TRAILING_EXECUTION_ENABLED = os.getenv("TRAILING_EXECUTION_ENABLED", "false").lower() in ("1", "true", "yes")
 TRAILING_MIN_HOLD_MINUTES = int(os.getenv("TRAILING_MIN_HOLD_MINUTES", "0"))
+RISK_OVERRUN_TOLERANCE_USD = float(os.getenv("RISK_OVERRUN_TOLERANCE_USD", "0.05"))
 
 PAPER_STATE_PATH = Path(os.getenv("FQ_PAPER_POSITION_STATE", "runtime/fusion_quantum/journal/open_positions.json"))
 PAPER_EQUITY_PATH = Path(os.getenv("FQ_PAPER_EQUITY_STATE", "runtime/fusion_quantum/journal/paper_equity.json"))
@@ -1868,7 +1869,7 @@ class PaperMainnetTrader:
         actual_gross_loss = abs(actual_exit - entry) * qty if ((side == "LONG" and actual_exit < entry) or (side == "SHORT" and actual_exit > entry)) else 0.0
         actual_slippage_usd = abs(actual_exit - exit_price) * qty
         actual_net_loss = max(0.0, -realized_net_pnl)
-        tolerance_usd = 0.05
+        tolerance_usd = RISK_OVERRUN_TOLERANCE_USD
         risk_overrun_usd = max(0.0, actual_net_loss - (planned_max_loss + tolerance_usd))
         is_risk_overrun = risk_overrun_usd > 0.0 and "SL" in reason.upper()
         if is_risk_overrun:

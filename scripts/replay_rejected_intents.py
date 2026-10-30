@@ -267,7 +267,13 @@ def run_replay(path: Path) -> Dict[str, Any]:
     print(f"- **net_pnl**:            ${summary['net_pnl']:+.2f}")
     print(f"- **loss_avoided**:       ${summary['loss_avoided']:.2f}")
     print(f"- **profit_missed**:      ${summary['profit_missed']:.2f}")
+    summary_data = {k: v for k, v in summary.items() if k != "output_hash"}
+    summary["output_hash"] = hashlib.sha256(
+        json.dumps(summary_data, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
     print(f"- **NET GATE BENEFIT**:   ${summary['net_gate_benefit']:+.2f}")
+    print(f"- **output_hash**:        {summary['output_hash']}")
 
     return summary
 
