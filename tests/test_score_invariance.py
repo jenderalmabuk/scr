@@ -1,12 +1,14 @@
 import inspect
 import json
 import os
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from gateway.order_intent import OrderIntent
-from gateway.service import ExecutionGateway, _classify_reject_layer
+from gateway.service import ExecutionGateway, _classify_reject_layer, verify_rejected_intents_journal, _compute_event_hash
 from execution.paper_mainnet_trader import PaperMainnetTrader
 
 
@@ -55,7 +57,6 @@ class TestScoreInvarianceAndNetRisk(unittest.TestCase):
             self.assertIsNone(err)
             results.append((notional, risk_amount))
 
-        # Assert all results are strictly identical down to 8 decimal places
         base_notional, base_risk = results[0]
         for notional, risk in results[1:]:
             self.assertAlmostEqual(notional, base_notional, places=8)
@@ -83,7 +84,6 @@ class TestScoreInvarianceAndNetRisk(unittest.TestCase):
         self.assertIsNone(err)
         self.assertLessEqual(risk_amount, 2.000001)
 
-        # Total adverse risk fraction = sl_frac (0.02) + 2*fee (0.0010) + slip (0.0005) + funding (0.0001) = 0.0216
         expected_notional = 2.0 / 0.0216
         self.assertAlmostEqual(notional, expected_notional, places=4)
 
@@ -109,15 +109,90 @@ class TestScoreInvarianceAndNetRisk(unittest.TestCase):
             "fee_usd": 0.15,
             "pnl_usd": -3.15,
         }
-        # Matching payload -> No error
         matching_notify = dict(journal_entry)
         matching_notify["symbol"] = "ETHUSDT"
         with self.assertLogs("gateway.paper", level="ERROR") as cm:
-            # Trigger mismatched payload
             mismatched_notify = dict(matching_notify)
-            mismatched_notify["pnl_usd"] = -2.50  # Divergence!
+            mismatched_notify["pnl_usd"] = -2.50
             trader._verify_raw_parity_assertions(journal_entry, mismatched_notify)
             self.assertTrue(any("NOTIFICATION_PARITY_MISMATCH" in msg for msg in cm.output))
+
+    def test_hash_chaining_and_tamper_detection(self):
+        """Verify that hash-chained journal validates clean logs and flags tampering immediately."""
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tmp:
+            tmp_path = Path(tmp.name)
+
+        try:
+            prev = "0" * 64
+            records = []
+            for i in range(3):
+                payload = {
+                    "schema_version": 2,
+                    "intent_id": f"intent_{i}",
+                    "symbol": "BTCUSDT",
+                    "previous_event_hash": prev,
+                }
+                h = _compute_event_hash(prev, payload)
+                payload["event_hash"] = h
+                records.append(payload)
+                prev = h
+                tmp_path.write_text(
+                    "\n".join(json.dumps(r, separators=(",", ":")) for r in records) + "\n",
+                    encoding="utf-8",
+                )
+
+            valid, count, msg = verify_rejected_intents_journal(tmp_path)
+            self.assertTrue(valid)
+            self.assertEqual(count, 3)
+
+            # Tamper with record 1
+            tampered = list(records)
+            tampered[1]["symbol"] = "SOLUSDT"  # Tampered field without rehash
+            tmp_path.write_text(
+                "\n".join(json.dumps(r, separators=(",", ":")) for r in tampered) + "\n",
+                encoding="utf-8",
+            )
+            valid_t, count_t, msg_t = verify_rejected_intents_journal(tmp_path)
+            self.assertFalse(valid_t)
+            self.assertIn("tamper detected", msg_t)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+    def test_duplicate_intent_suppression(self):
+        """Verify that duplicate rejected intent_ids are not appended twice to journal."""
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tmp:
+            tmp_path = Path(tmp.name)
+
+        try:
+            with patch("gateway.service.REJECTED_INTENTS_PATH", tmp_path):
+                mock_risk_mgr = MagicMock()
+                mock_trader = MagicMock()
+                gw = ExecutionGateway(risk_mgr=mock_risk_mgr, trader=mock_trader)
+
+                intent = OrderIntent(
+                    source="SIGNAL_COPY",
+                    symbol="DOGEUSDT",
+                    side="LONG",
+                    entry_price=0.10,
+                    sl_price=0.09,
+                    risk_pct=0.01,
+                )
+                from gateway.service import GatewayResult
+                res = GatewayResult(ok=False, reason="TEST_REJECT")
+
+                # First call appends
+                gw._append_rejected_intent(intent, res)
+                lines_1 = [l for l in tmp_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+                self.assertEqual(len(lines_1), 1)
+
+                # Duplicate call is suppressed
+                gw._append_rejected_intent(intent, res)
+                lines_2 = [l for l in tmp_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+                self.assertEqual(len(lines_2), 1)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
 
 if __name__ == "__main__":

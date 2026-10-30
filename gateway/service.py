@@ -80,6 +80,43 @@ def _classify_reject_layer(reason: str) -> str:
     return "GATEWAY_SAFETY"
 
 
+def _compute_event_hash(prev_hash: str, payload_data: Dict[str, Any]) -> str:
+    canonical = prev_hash + "|" + json.dumps(payload_data, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def verify_rejected_intents_journal(path: Path) -> tuple[bool, int, str]:
+    """Verify append-only cryptographic hash chain on journal."""
+    if not path.exists():
+        return True, 0, "file_not_found_empty"
+    prev_hash = "0" * 64
+    count = 0
+    with path.open("r", encoding="utf-8") as f:
+        for idx, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as err:
+                return False, count, f"line {idx} json decode error: {err}"
+            
+            stored_prev = rec.get("previous_event_hash")
+            stored_hash = rec.get("event_hash")
+            if stored_prev != prev_hash:
+                return False, count, f"line {idx} hash-chain break: stored_prev={stored_prev} != expected={prev_hash}"
+            
+            # Recompute expected hash
+            data_copy = {k: v for k, v in rec.items() if k != "event_hash"}
+            expected_hash = _compute_event_hash(prev_hash, data_copy)
+            if stored_hash != expected_hash:
+                return False, count, f"line {idx} tamper detected: stored_hash={stored_hash} != expected={expected_hash}"
+            
+            prev_hash = stored_hash
+            count += 1
+    return True, count, "chain_valid"
+
+
 def trader_rejected(response) -> bool:
     """Normalize bool/dict trader contracts into one rejection decision."""
     return not response or (
@@ -140,6 +177,9 @@ class ExecutionGateway:
         self.history: List[Dict[str, Any]] = []   # last N results, for /portfolio & debugging
         self._history_max = 200
         self.smart_virtual_book = None
+        self._symbol_sl_times: Dict[str, float] = {}
+        self._seen_rejected_intent_ids: set = set()
+        self._last_reject_event_hash: Optional[str] = None
 
     # ── public API ───────────────────────────────────────────
 
@@ -631,8 +671,31 @@ class ExecutionGateway:
             self._append_rejected_intent(intent, res)
         return res
 
+    def _get_last_reject_hash_from_disk(self) -> str:
+        if not REJECTED_INTENTS_PATH.exists():
+            return "0" * 64
+        try:
+            with REJECTED_INTENTS_PATH.open("r", encoding="utf-8") as f:
+                last_line = ""
+                for line in f:
+                    if line.strip():
+                        last_line = line.strip()
+                if last_line:
+                    rec = json.loads(last_line)
+                    return str(rec.get("event_hash") or ("0" * 64))
+        except Exception:
+            pass
+        return "0" * 64
+
     def _append_rejected_intent(self, intent: OrderIntent, res: GatewayResult) -> None:
         try:
+            intent_id = str(intent.intent_id or "")
+            if intent_id and intent_id in self._seen_rejected_intent_ids:
+                logger.debug("[GATEWAY] duplicate rejected intent_id %s suppressed from journal", intent_id)
+                return
+            if intent_id:
+                self._seen_rejected_intent_ids.add(intent_id)
+
             REJECTED_INTENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
             snapshot = dict(intent.adv_snapshot or {})
             raw_score = _safe_float(snapshot.get("raw_score", snapshot.get("score")), 0.0)
@@ -647,9 +710,16 @@ class ExecutionGateway:
             now_iso = datetime.now(timezone.utc).isoformat()
             regime_observed = snapshot.get("regime_observed_at") or snapshot.get("price_observed_at") or now_iso
             sig_id = getattr(intent, "signal_id", None) or snapshot.get("signal_id") or getattr(intent, "tag", None) or getattr(intent, "intent_id", "")
+            
+            # Fetch previous event hash for blockchain-style hash chaining
+            if self._last_reject_event_hash is None:
+                self._last_reject_event_hash = self._get_last_reject_hash_from_disk()
+            prev_hash = self._last_reject_event_hash
+
             payload = {
+                "schema_version": 2,
                 "signal_id": str(sig_id or ""),
-                "intent_id": str(intent.intent_id or ""),
+                "intent_id": intent_id,
                 "decision_timestamp": now_iso,
                 "reject_layer": _classify_reject_layer(res.reason),
                 "primary_reason": str(res.reason or "UNKNOWN"),
@@ -670,8 +740,17 @@ class ExecutionGateway:
                 },
                 "config_hash": _get_active_config_hash(),
                 "code_hash": _get_active_code_hash(),
+                "previous_event_hash": prev_hash,
             }
+
+            event_hash = _compute_event_hash(prev_hash, payload)
+            payload["event_hash"] = event_hash
+            self._last_reject_event_hash = event_hash
+
+            # Durable Append with explicit flush and fsync
             with REJECTED_INTENTS_PATH.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(payload, default=str, separators=(",", ":")) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
         except Exception as exc:
             logger.warning("[GATEWAY] failed to append rejected intent: %s", exc)

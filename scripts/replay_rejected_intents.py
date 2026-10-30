@@ -1,30 +1,35 @@
 #!/usr/bin/env python3
 """
-Counterfactual Replay Engine for Rejected Intents.
+Deterministic Counterfactual Replay Engine for Rejected Intents.
 
-Reads /opt/signalcopyreal/journal/rejected_intents.jsonl and analyzes:
-1. Breakdown of rejected intents per gate/layer.
-2. Conservative counterfactual replay:
-   - Evaluates hypothetical outcomes if the trade had been executed.
-   - Includes taker fees (0.05% x 2), adverse slippage (0.05%), and funding buffer (0.01%).
-   - Conservative rule: If both SL and TP price levels are within the same range, assume SL hit.
-   - Computes:
-     * loss_avoided (USD saved by blocking losing signals)
-     * profit_missed (USD missed by blocking winning signals)
-     * net_gate_benefit = loss_avoided - profit_missed
-     * unknown_outcome (unresolved / no market data)
+Reads /opt/signalcopyreal/journal/rejected_intents.jsonl, verifies its
+cryptographic hash-chain integrity, and performs deterministic simulation:
+- input_count
+- resolved_count
+- unknown_count
+- would_have_won
+- would_have_lost
+- gross_pnl
+- fees
+- funding
+- slippage
+- net_pnl
+- loss_avoided
+- profit_missed
+- net_gate_benefit = loss_avoided - profit_missed
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -32,6 +37,40 @@ JOURNAL_PATH = Path(os.getenv("REJECTED_INTENTS_PATH", "/opt/signalcopyreal/jour
 TAKER_FEE_PCT = float(os.getenv("PAPER_TAKER_FEE_PCT", "0.0005"))
 SLIPPAGE_PCT = float(os.getenv("PAPER_SLIPPAGE_PCT", "0.0005"))
 FUNDING_BUF_PCT = float(os.getenv("PAPER_FUNDING_BUFFER_PCT", "0.0001"))
+
+
+def _compute_event_hash(prev_hash: str, payload_data: Dict[str, Any]) -> str:
+    canonical = prev_hash + "|" + json.dumps(payload_data, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def verify_journal_chain(path: Path) -> Tuple[bool, int, str]:
+    if not path.exists() or path.stat().st_size == 0:
+        return True, 0, "file_empty_or_new"
+    prev_hash = "0" * 64
+    count = 0
+    with path.open("r", encoding="utf-8") as f:
+        for idx, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as err:
+                return False, count, f"line {idx} json error: {err}"
+            
+            stored_prev = rec.get("previous_event_hash")
+            stored_hash = rec.get("event_hash")
+            if stored_prev is not None and stored_hash is not None:
+                if stored_prev != prev_hash:
+                    return False, count, f"line {idx} hash-chain break: prev={stored_prev[:8]} != expected={prev_hash[:8]}"
+                data_copy = {k: v for k, v in rec.items() if k != "event_hash"}
+                expected_hash = _compute_event_hash(prev_hash, data_copy)
+                if stored_hash != expected_hash:
+                    return False, count, f"line {idx} tamper detected"
+                prev_hash = stored_hash
+            count += 1
+    return True, count, "chain_valid"
 
 
 def load_rejected_intents(path: Path) -> List[Dict[str, Any]]:
@@ -51,7 +90,6 @@ def load_rejected_intents(path: Path) -> List[Dict[str, Any]]:
 
 
 def evaluate_counterfactual(record: Dict[str, Any], klines_cache: Dict[str, Any]) -> Dict[str, Any]:
-    """Conservatively evaluate hypothetical trade outcome."""
     symbol = record.get("symbol", "")
     side = record.get("side", "").upper()
     entry = float(record.get("entry", 0.0) or 0.0)
@@ -60,15 +98,13 @@ def evaluate_counterfactual(record: Dict[str, Any], klines_cache: Dict[str, Any]
     tp1 = float(tps[0]) if tps else 0.0
 
     if entry <= 0 or sl <= 0 or not symbol:
-        return {"status": "UNKNOWN", "reason": "invalid_levels", "pnl": 0.0}
+        return {"status": "UNKNOWN", "reason": "invalid_levels", "gross_pnl": 0.0, "fees": 0.0, "funding": 0.0, "slippage": 0.0, "net_pnl": 0.0}
 
-    # Standard paper fixed risk sizing ($2.00 net)
     sl_frac = abs(entry - sl) / entry
     total_cost_frac = sl_frac + (2.0 * TAKER_FEE_PCT) + SLIPPAGE_PCT + FUNDING_BUF_PCT
     notional = 2.0 / max(total_cost_frac, 1e-6)
     qty = notional / entry
 
-    # Fetch recent candles from Bybit if not cached
     if symbol not in klines_cache:
         url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval=15&limit=200"
         try:
@@ -82,12 +118,9 @@ def evaluate_counterfactual(record: Dict[str, Any], klines_cache: Dict[str, Any]
 
     rows = klines_cache.get(symbol, [])
     if not rows:
-        return {"status": "UNKNOWN", "reason": "market_data_unavailable", "pnl": 0.0}
+        return {"status": "UNKNOWN", "reason": "market_data_unavailable", "gross_pnl": 0.0, "fees": 0.0, "funding": 0.0, "slippage": 0.0, "net_pnl": 0.0}
 
-    # Reverse rows to chronological order (Bybit returns newest first)
     chronological = list(reversed(rows))
-    
-    # Track price trajectory
     entry_filled = False
     hit_sl = False
     hit_tp = False
@@ -97,12 +130,10 @@ def evaluate_counterfactual(record: Dict[str, Any], klines_cache: Dict[str, Any]
         low = float(row[3])
 
         if not entry_filled:
-            # Check if entry touched
-            if (side == "LONG" and low <= entry <= high) or (side == "SHORT" and low <= entry <= high):
+            if low <= entry <= high:
                 entry_filled = True
             continue
 
-        # When filled, check SL / TP hits
         if side == "LONG":
             sl_hit_this_bar = low <= sl
             tp_hit_this_bar = high >= tp1 if tp1 > 0 else False
@@ -110,7 +141,7 @@ def evaluate_counterfactual(record: Dict[str, Any], klines_cache: Dict[str, Any]
             sl_hit_this_bar = high >= sl
             tp_hit_this_bar = low <= tp1 if tp1 > 0 else False
 
-        # Conservative rule: If both hit within the same candle, assume SL hit first
+        # Conservative Rule: Same-candle hit resolves to SL first
         if sl_hit_this_bar and tp_hit_this_bar:
             hit_sl = True
             break
@@ -122,95 +153,127 @@ def evaluate_counterfactual(record: Dict[str, Any], klines_cache: Dict[str, Any]
             break
 
     if not entry_filled:
-        return {"status": "UNKNOWN", "reason": "entry_not_touched", "pnl": 0.0}
+        return {"status": "UNKNOWN", "reason": "entry_not_touched", "gross_pnl": 0.0, "fees": 0.0, "funding": 0.0, "slippage": 0.0, "net_pnl": 0.0}
+
+    fees = (notional * TAKER_FEE_PCT) * 2.0
+    slippage = notional * SLIPPAGE_PCT
+    funding = notional * FUNDING_BUF_PCT
 
     if hit_sl:
-        # Avoided a loss of ~$2.00
-        loss_amount = notional * total_cost_frac
-        return {"status": "AVOIDED_LOSS", "pnl": -loss_amount, "notional": notional}
+        gross_loss = abs(entry - sl) * qty
+        net_loss = -(gross_loss + fees + slippage + funding)
+        return {
+            "status": "AVOIDED_LOSS",
+            "gross_pnl": -gross_loss,
+            "fees": fees,
+            "funding": funding,
+            "slippage": slippage,
+            "net_pnl": net_loss,
+            "loss_avoided": abs(net_loss),
+            "profit_missed": 0.0,
+        }
     elif hit_tp:
-        # Missed a profit
         tp_gross = (tp1 - entry) * qty if side == "LONG" else (entry - tp1) * qty
-        fees = (notional * TAKER_FEE_PCT) + (tp1 * qty * TAKER_FEE_PCT)
-        net_profit = tp_gross - fees
-        return {"status": "MISSED_PROFIT", "pnl": net_profit, "notional": notional}
+        net_profit = tp_gross - (fees + funding)
+        return {
+            "status": "MISSED_PROFIT",
+            "gross_pnl": tp_gross,
+            "fees": fees,
+            "funding": funding,
+            "slippage": 0.0,
+            "net_pnl": net_profit,
+            "loss_avoided": 0.0,
+            "profit_missed": max(0.0, net_profit),
+        }
     else:
-        return {"status": "UNKNOWN", "reason": "unresolved_in_sample", "pnl": 0.0}
+        return {"status": "UNKNOWN", "reason": "unresolved_in_sample", "gross_pnl": 0.0, "fees": 0.0, "funding": 0.0, "slippage": 0.0, "net_pnl": 0.0}
 
 
-def run_replay(path: Path) -> None:
+def run_replay(path: Path) -> Dict[str, Any]:
+    valid_chain, chain_len, chain_msg = verify_journal_chain(path)
     records = load_rejected_intents(path)
     total_intents = len(records)
 
     print(f"==================================================")
-    print(f" COUNTERFACTUAL REPLAY AUDIT (N={total_intents})")
+    print(f" DETERMINISTIC COUNTERFACTUAL REPLAY ENGINE")
     print(f" Source: {path}")
+    print(f" Integrity: {'VALID' if valid_chain else 'COMPROMISED'} ({chain_msg}, len={chain_len})")
     print(f" Timestamp: {datetime.now(timezone.utc).isoformat()}")
     print(f"==================================================\n")
 
-    if not records:
-        print("No rejected intents recorded yet.")
-        print("All incoming order intents are currently passing gates or system is flat.\n")
-        return
+    summary = {
+        "input_count": total_intents,
+        "resolved_count": 0,
+        "unknown_count": 0,
+        "would_have_won": 0,
+        "would_have_lost": 0,
+        "gross_pnl": 0.0,
+        "fees": 0.0,
+        "funding": 0.0,
+        "slippage": 0.0,
+        "net_pnl": 0.0,
+        "loss_avoided": 0.0,
+        "profit_missed": 0.0,
+        "net_gate_benefit": 0.0,
+    }
 
-    # 1. Gate Breakdown
+    if not records:
+        print("No rejected intents recorded in journal yet.")
+        print("System is awaiting forward-test signals.\n")
+        return summary
+
     layer_counts = defaultdict(int)
-    reason_counts = defaultdict(int)
     for r in records:
         layer_counts[r.get("reject_layer", "UNKNOWN")] += 1
-        reason_counts[r.get("primary_reason", "UNKNOWN")] += 1
 
-    print("### 1. Rejection Distribution by Layer")
+    print("### 1. Reject Layer Breakdown")
     print("| Reject Layer | Count | Share |")
     print("|---|---|---|")
     for layer, count in sorted(layer_counts.items(), key=lambda x: x[1], reverse=True):
         print(f"| {layer} | {count} | {count/total_intents*100:.1f}% |")
 
-    print("\n### 2. Top Primary Reject Reasons")
-    print("| Reason | Count |")
-    print("|---|---|")
-    for reason, count in sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
-        print(f"| {reason[:60]} | {count} |")
-
-    # 2. Counterfactual Simulation
     klines_cache: Dict[str, Any] = {}
-    loss_avoided = 0.0
-    profit_missed = 0.0
-    count_avoided = 0
-    count_missed = 0
-    count_unknown = 0
-
-    print("\nSimulating market replay for rejected signals...")
     for r in records:
-        res = evaluate_counterfactual(r, klines_cache)
-        status = res.get("status")
-        if status == "AVOIDED_LOSS":
-            loss_avoided += abs(res.get("pnl", 0.0))
-            count_avoided += 1
-        elif status == "MISSED_PROFIT":
-            profit_missed += res.get("pnl", 0.0)
-            count_missed += 1
+        out = evaluate_counterfactual(r, klines_cache)
+        st = out["status"]
+        if st in ("AVOIDED_LOSS", "MISSED_PROFIT"):
+            summary["resolved_count"] += 1
+            if st == "AVOIDED_LOSS":
+                summary["would_have_lost"] += 1
+                summary["loss_avoided"] += out.get("loss_avoided", 0.0)
+            else:
+                summary["would_have_won"] += 1
+                summary["profit_missed"] += out.get("profit_missed", 0.0)
+            summary["gross_pnl"] += out.get("gross_pnl", 0.0)
+            summary["fees"] += out.get("fees", 0.0)
+            summary["funding"] += out.get("funding", 0.0)
+            summary["slippage"] += out.get("slippage", 0.0)
+            summary["net_pnl"] += out.get("net_pnl", 0.0)
         else:
-            count_unknown += 1
+            summary["unknown_count"] += 1
 
-    net_gate_benefit = loss_avoided - profit_missed
+    summary["net_gate_benefit"] = summary["loss_avoided"] - summary["profit_missed"]
 
-    print("\n### 3. Counterfactual Gate Benefit Summary")
-    print(f"- **Loss Avoided (Blocked Losses)**:  ${loss_avoided:.2f} ({count_avoided} signals)")
-    print(f"- **Profit Missed (Blocked Wins)**:   ${profit_missed:.2f} ({count_missed} signals)")
-    print(f"- **Unknown / Unresolved**:           {count_unknown} signals")
-    print(f"- **NET GATE BENEFIT**:               ${net_gate_benefit:+.2f}")
+    print("\n### 2. Deterministic Audit Metrics")
+    print(f"- **input_count**:        {summary['input_count']}")
+    print(f"- **resolved_count**:     {summary['resolved_count']}")
+    print(f"- **unknown_count**:      {summary['unknown_count']}")
+    print(f"- **would_have_won**:     {summary['would_have_won']}")
+    print(f"- **would_have_lost**:    {summary['would_have_lost']}")
+    print(f"- **gross_pnl**:          ${summary['gross_pnl']:+.2f}")
+    print(f"- **fees**:               ${summary['fees']:.2f}")
+    print(f"- **funding**:            ${summary['funding']:.2f}")
+    print(f"- **slippage**:           ${summary['slippage']:.2f}")
+    print(f"- **net_pnl**:            ${summary['net_pnl']:+.2f}")
+    print(f"- **loss_avoided**:       ${summary['loss_avoided']:.2f}")
+    print(f"- **profit_missed**:      ${summary['profit_missed']:.2f}")
+    print(f"- **NET GATE BENEFIT**:   ${summary['net_gate_benefit']:+.2f}")
 
-    if net_gate_benefit > 0:
-        print("\nVerdict: Gating demonstrates POSITIVE net expectancy (Loss Avoided > Profit Missed).")
-    elif net_gate_benefit < 0:
-        print("\nVerdict: Gating throttles profit; review gate selectivity.")
-    else:
-        print("\nVerdict: Neutral gate expectancy.")
+    return summary
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Replay rejected intents counterfactual journal")
+    parser = argparse.ArgumentParser(description="Deterministic counterfactual replay audit")
     parser.add_argument("--path", type=str, default=str(JOURNAL_PATH), help="Path to rejected_intents.jsonl")
     args = parser.parse_args()
     run_replay(Path(args.path))
