@@ -28,7 +28,7 @@ from gateway.service import (
     GatewayResult,
     verify_rejected_intents_journal,
     recover_journal_after_crash,
-    REJECTED_INTENTS_PATH,
+    REJECTED_INTENTS_PATH, _compute_event_hash,
 )
 
 def _worker_append(journal_path_str: str, worker_id: int, num_items: int):
@@ -154,11 +154,33 @@ def main():
             assert not rec_mid_ok, "Recovery must strictly REFUSE to repair middle-of-file tampering!"
             scenarios.append(("Scenario 9: Middle-File Tamper Refusal", f"strictly refused ({rec_mid_msg[:35]}...)", "PASS"))
 
-        # SCENARIO 10: Production Journal Invariance Proof
+            # SCENARIO 10: Valid JSON with Bad Hash Refusal (Never Treated as Crash Tail)
+            # Re-create a clean 3-record journal, then append a 4th record that is complete valid JSON but forged hash
+            tmp_path.write_text("")
+            prev = "0" * 64
+            clean_recs = []
+            for i in range(3):
+                p = {"schema_version": 2, "intent_id": f"clean_{i}", "previous_event_hash": prev}
+                h = _compute_event_hash(prev, p)
+                p["event_hash"] = h
+                clean_recs.append(p)
+                prev = h
+            forged_tail = {"schema_version": 2, "intent_id": "forged_tail", "previous_event_hash": prev, "event_hash": "e" * 64}
+            clean_recs.append(forged_tail)
+            tmp_path.write_text("\n".join(json.dumps(r, separators=(",", ":")) for r in clean_recs) + "\n")
+            bytes_before_forge = tmp_path.stat().st_size
+
+            rec_bad_ok, _, rec_bad_msg = recover_journal_after_crash(tmp_path)
+            assert not rec_bad_ok, "Recovery must REFUSE complete JSON with forged hash!"
+            assert "tamper_refusal" in rec_bad_msg
+            assert tmp_path.stat().st_size == bytes_before_forge, "Corrupt file must not be truncated when complete JSON!"
+            scenarios.append(("Scenario 10: Valid JSON Bad Hash Refusal", "refused recovery of complete JSON with forged hash", "PASS"))
+
+        # SCENARIO 11: Production Journal Invariance Proof
         prod_bytes_after = prod_path.read_bytes() if prod_path.exists() else b""
         prod_lines_after = len(prod_bytes_after.splitlines())
         assert prod_bytes_before == prod_bytes_after, "FATAL: Production journal was modified during test run!"
-        scenarios.append(("Scenario 10: Production Journal Contamination Invariance", f"prod untouched ({prod_lines_after} lines identical)", "PASS"))
+        scenarios.append(("Scenario 11: Production Journal Contamination Invariance", f"prod untouched ({prod_lines_after} lines identical)", "PASS"))
 
     finally:
         if tmp_path.exists():

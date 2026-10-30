@@ -140,6 +140,18 @@ def recover_journal_after_crash(path: Path) -> tuple[bool, int, str]:
             lines.pop()
         if not lines:
             return False, 0, "empty_or_whitespace_only"
+        # Check if the final line is a syntactically valid JSON object.
+        # If it is valid JSON, but the overall chain was invalid, this is NOT a crash mid-write.
+        # It represents a tampered record or corrupted hash that must be rejected!
+        last_line_str = lines[-1].decode("utf-8", errors="replace").strip()
+        try:
+            last_rec = json.loads(last_line_str)
+            if isinstance(last_rec, dict):
+                return False, 0, "tamper_refusal: final line is complete JSON with mismatched cryptographic hash"
+        except Exception:
+            # Final line is NOT valid JSON -> it is an incomplete partial write from a sudden crash/power loss
+            pass
+
         test_lines = lines[:-1]
         prev_hash = "0" * 64
         valid_count = 0
@@ -236,19 +248,39 @@ class ExecutionGateway:
         self._symbol_sl_times: Dict[str, float] = {}
         self._seen_rejected_intent_ids: set = set()
         self._last_reject_event_hash: Optional[str] = None
-        self.accepted_intents_count: int = 0
-        self.rejected_intents_count: int = 0
+        self.intents_received: int = 0
+        self.intents_rejected: int = 0
+        self.intents_eligible: int = 0
+        self.orders_submitted: int = 0
+        self.orders_filled: int = 0
+        self.orders_partially_filled: int = 0
+        self.orders_cancelled: int = 0
+        self.duplicate_intents_suppressed: int = 0
         self.journal_write_failures: int = 0
         self.journal_write_retries: int = 0
-        self.duplicate_intents_suppressed: int = 0
+        self.audit_degraded: bool = False
+        self.audit_degraded_reason: str = ""
         self._rebuild_seen_rejected_intents()
+
+    @property
+    def accepted_intents_count(self) -> int:
+        return self.orders_filled
+
+    @property
+    def rejected_intents_count(self) -> int:
+        return self.intents_rejected
 
     # ── public API ───────────────────────────────────────────
 
     async def execute(self, intent: OrderIntent, *, dry_run: bool = False) -> GatewayResult:
         """Run one intent through the full unified pipeline."""
+        self.intents_received += 1
         res = GatewayResult(ok=False, reason="", intent_id=intent.intent_id,
                             symbol=intent.symbol, side=str(intent.side).upper())
+
+        if self.audit_degraded:
+            res.reason = f"GATEWAY_AUDIT_DEGRADED: {self.audit_degraded_reason}; new entries blocked"
+            return self._record(intent, res)
 
         # 1) validate the contract itself
         err = intent.validate()
@@ -395,6 +427,9 @@ class ExecutionGateway:
                         symbol, intent.source, side, entry, notional, sl)
             return self._record(intent, res)
 
+        # Passed all gates -> ELIGIBLE
+        self.intents_eligible += 1
+
         # 5) reserve -> submit -> commit/release (identical semantics to signal_copy)
         try:
             reserve = await self.risk_mgr.reserve_open_risk_details(symbol, risk_amount)
@@ -407,9 +442,11 @@ class ExecutionGateway:
             res.reason = f"open-risk reservation blocked: {reserve['code']}"
             return self._record(intent, res)
 
+        self.orders_submitted += 1
         try:
             opened = await self.trader.submit_open(timeout_sec=self.submit_timeout_sec, **payload)
         except Exception as exc:
+            self.orders_cancelled += 1
             logger.exception("[GATEWAY] submit_open failed %s: %s", symbol, exc)
             await self._safe_release(symbol)
             res.reason = f"submit_open error: {exc}"
@@ -417,6 +454,7 @@ class ExecutionGateway:
 
         res.trader_response = opened if isinstance(opened, dict) else {"raw": str(opened)}
         if trader_rejected(opened):
+            self.orders_cancelled += 1
             await self._safe_release(symbol)
             reason_detail = ""
             if isinstance(opened, dict) and opened.get("error"):
@@ -434,6 +472,7 @@ class ExecutionGateway:
             fill_entry > 0 and fill_notional > 0
         )
         if not position_confirmed:
+            self.orders_cancelled += 1
             await self._safe_release(symbol)
             res.reason = "trader accepted but no position confirmed"
             res.position_confirmed = False
@@ -447,6 +486,7 @@ class ExecutionGateway:
         except Exception as exc:
             logger.warning("[GATEWAY] commit_open_trade error %s: %s", symbol, exc)
 
+        self.orders_filled += 1
         res.ok = True
         res.reason = "opened"
         res.position_confirmed = True
@@ -522,11 +562,19 @@ class ExecutionGateway:
             out["open_positions"] = []
         out["recent_intents"] = self.history[-20:]
         out["audit_counters"] = {
-            "accepted_intents_count": self.accepted_intents_count,
-            "rejected_intents_count": self.rejected_intents_count,
+            "intents_received": self.intents_received,
+            "intents_rejected": self.intents_rejected,
+            "intents_eligible": self.intents_eligible,
+            "orders_submitted": self.orders_submitted,
+            "orders_filled": self.orders_filled,
+            "orders_partially_filled": self.orders_partially_filled,
+            "orders_cancelled": self.orders_cancelled,
+            "duplicate_intents_suppressed": self.duplicate_intents_suppressed,
             "journal_write_failures": self.journal_write_failures,
             "journal_write_retries": self.journal_write_retries,
-            "duplicate_intents_suppressed": self.duplicate_intents_suppressed,
+            "audit_degraded": self.audit_degraded,
+            "accepted_intents_count": self.accepted_intents_count,
+            "rejected_intents_count": self.rejected_intents_count,
         }
         return out
 
@@ -736,11 +784,9 @@ class ExecutionGateway:
         if len(self.history) > self._history_max:
             self.history = self.history[-self._history_max:]
         if not res.ok:
-            self.rejected_intents_count += 1
+            self.intents_rejected += 1
             logger.info("[GATEWAY] REJECTED %s src=%s: %s", intent.symbol, intent.source, res.reason)
             self._append_rejected_intent(intent, res)
-        else:
-            self.accepted_intents_count += 1
         return res
 
     def _rebuild_seen_rejected_intents(self) -> None:
@@ -831,45 +877,59 @@ class ExecutionGateway:
                 "code_hash": _get_active_code_hash(),
             }
 
-            # Atomic Durable Append under Exclusive File Lock (prevents forks across concurrent workers)
-            with REJECTED_INTENTS_PATH.open("a+", encoding="utf-8") as f:
-                if fcntl is not None:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            # Atomic Durable Append under Exclusive File Lock with 3-attempt retry
+            for attempt in range(3):
                 try:
-                    if intent_id and intent_id in self._seen_rejected_intent_ids:
-                        self.duplicate_intents_suppressed += 1
-                        logger.debug("[GATEWAY] duplicate rejected intent_id %s suppressed from journal", intent_id)
-                        return
-                    if intent_id:
-                        self._seen_rejected_intent_ids.add(intent_id)
-
-                    # Read latest tip under lock to guarantee unbroken monotonic hash chain
-                    f.seek(0)
-                    last_line = ""
-                    for line in f:
-                        if line.strip():
-                            last_line = line.strip()
-                    prev_hash = "0" * 64
-                    if last_line:
+                    with REJECTED_INTENTS_PATH.open("a+", encoding="utf-8") as f:
+                        if fcntl is not None:
+                            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                         try:
-                            rec = json.loads(last_line)
-                            prev_hash = str(rec.get("event_hash") or ("0" * 64))
-                        except Exception:
-                            prev_hash = self._last_reject_event_hash or ("0" * 64)
+                            if intent_id and intent_id in self._seen_rejected_intent_ids:
+                                self.duplicate_intents_suppressed += 1
+                                logger.debug("[GATEWAY] duplicate rejected intent_id %s suppressed from journal", intent_id)
+                                return
+                            if intent_id:
+                                self._seen_rejected_intent_ids.add(intent_id)
 
-                    payload = dict(payload_base)
-                    payload["previous_event_hash"] = prev_hash
-                    event_hash = _compute_event_hash(prev_hash, payload)
-                    payload["event_hash"] = event_hash
-                    self._last_reject_event_hash = event_hash
+                            # Read latest tip under lock to guarantee unbroken monotonic hash chain
+                            f.seek(0)
+                            last_line = ""
+                            for line in f:
+                                if line.strip():
+                                    last_line = line.strip()
+                            prev_hash = "0" * 64
+                            if last_line:
+                                try:
+                                    rec = json.loads(last_line)
+                                    prev_hash = str(rec.get("event_hash") or ("0" * 64))
+                                except Exception:
+                                    prev_hash = self._last_reject_event_hash or ("0" * 64)
 
-                    f.seek(0, 2)
-                    f.write(json.dumps(payload, default=str, separators=(",", ":")) + "\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-                finally:
-                    if fcntl is not None:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                            payload = dict(payload_base)
+                            payload["previous_event_hash"] = prev_hash
+                            event_hash = _compute_event_hash(prev_hash, payload)
+                            payload["event_hash"] = event_hash
+                            self._last_reject_event_hash = event_hash
+
+                            f.seek(0, 2)
+                            f.write(json.dumps(payload, default=str, separators=(",", ":")) + "\n")
+                            f.flush()
+                            os.fsync(f.fileno())
+                            return
+                        finally:
+                            if fcntl is not None:
+                                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except Exception as inner_exc:
+                    if attempt < 2:
+                        self.journal_write_retries += 1
+                        time.sleep(0.02)
+                    else:
+                        raise inner_exc
         except Exception as exc:
             self.journal_write_failures += 1
-            logger.critical("[ALARM] JOURNAL_WRITE_FAILURE on %s %s: %s", getattr(intent, 'symbol', ''), intent_id, exc)
+            self.audit_degraded = True
+            self.audit_degraded_reason = f"JOURNAL_WRITE_FAILURE: {exc}"
+            logger.critical(
+                "[ALARM] JOURNAL_WRITE_FAILURE on %s %s: %s -> GATEWAY ENTERED AUDIT_DEGRADED MODE (fail-closed)",
+                getattr(intent, "symbol", ""), intent_id, exc
+            )

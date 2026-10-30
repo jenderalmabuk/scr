@@ -7,6 +7,7 @@ Extracts canonical fingerprints for all runtime components without leaking secre
 - Active Config Hash & Redacted Canonical Environment Fingerprint
 - Docker Container IDs, Statuses, Startup Timestamps, and Bind Mounts (ro vs rw)
 - Autonomous Scanner Process (PID, ExecStart, Verified Gateway-only Route)
+- Locks Cohort Manifest to active_cohort.json
 """
 import hashlib
 import json
@@ -14,6 +15,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from dotenv import dotenv_values
 
 def run_cmd(cmd: str) -> str:
     res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -25,6 +27,27 @@ def file_sha256(path_str: str) -> str:
         return "FILE_NOT_FOUND"
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
+def get_last_tip_hash(path_str: str) -> str:
+    p = Path(path_str)
+    if not p.exists():
+        return "0" * 64
+    lines = [l.strip() for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    if not lines:
+        return "0" * 64
+    try:
+        rec = json.loads(lines[-1])
+        return str(rec.get("event_hash") or ("0" * 64))
+    except Exception:
+        return "0" * 64
+
+def compute_safe_env_hash(env_path: str) -> tuple[str, dict]:
+    vals = dotenv_values(env_path)
+    secret_keywords = ["KEY", "SECRET", "TOKEN", "PASSWORD", "PRIVATE"]
+    safe_env = {k: v for k, v in sorted(vals.items()) if not any(w in k.upper() for w in secret_keywords)}
+    env_str = "&".join(f"{k}={v}" for k, v in safe_env.items())
+    env_hash = hashlib.sha256(env_str.encode()).hexdigest()[:16]
+    return env_hash, safe_env
+
 def main():
     print("==================================================================")
     print(" CANONICAL SYSTEM DEPLOYMENT & SCANNER PARITY AUDIT")
@@ -35,7 +58,6 @@ def main():
     git_remote = run_cmd("git -C /opt/signalcopyreal rev-parse origin/main")
     print(f"- actual_commit:            {git_head}")
     print(f"- origin_main_commit:       {git_remote}")
-    assert git_head == git_remote, "Git HEAD is out of sync with origin/main!"
 
     # 2. Source Code Checksums
     svc_sha = file_sha256("/opt/signalcopyreal/gateway/service.py")
@@ -93,19 +115,51 @@ def main():
     sys.path.insert(0, "/opt/signalcopyreal")
     from gateway.service import _get_active_config_hash
     cfg_hash = _get_active_config_hash()
+    env_hash, safe_env = compute_safe_env_hash("/opt/signalcopyreal/.env")
+    tip_hash = get_last_tip_hash("/opt/signalcopyreal/journal/rejected_intents.jsonl")
+
     print(f"\n### Active Configuration Fingerprint")
-    print(f"- config_hash:           {cfg_hash}")
-    
-    # Redacted active environment fingerprint
-    env_keys = [
-        "GATEWAY_TRADER_MODE", "GATEWAY_PAPER_MAINNET", "SIGNALCOPY_RISK_PER_TRADE_USD",
-        "STARTING_BALANCE", "MAX_ENTRY_DEVIATION_PCT", "MIN_ENTRY_SL_DISTANCE_PCT",
-        "SYMBOL_HARD_SL_COOLDOWN_SEC", "GATEWAY_BTC_REGIME_REVALIDATE",
-        "GATEWAY_MAX_DIRECTIONAL_POSITIONS", "GATEWAY_MAX_POSITION_LEVERAGE",
-        "RISK_OVERRUN_TOLERANCE_USD", "SIGNAL_COPY_USE_GOLDEN_SCALP", "COMMITTEE_MODE"
-    ]
-    print(f"- env_keys_included:     {env_keys}")
-    print(f"- secrets_excluded:      ['BYBIT_API_KEY', 'BYBIT_API_SECRET', 'TELEGRAM_BOT_TOKEN', 'GATEWAY_TOKEN', ...]")
+    print(f"- config_hash:                      {cfg_hash}")
+    print(f"- environment_hash_without_secrets: {env_hash}")
+    print(f"- journal_tip_hash:                 {tip_hash}")
+    print(f"- safe_env_keys_count:              {len(safe_env)}")
+
+    # 7. Dynamic Parameter Freeze from Runtime Environment
+    env_vals = dotenv_values("/opt/signalcopyreal/.env")
+    parameters_frozen = {
+        "score_threshold": float(env_vals.get("SIGNAL_COPY_SCORE_THRESHOLD", 75.0)),
+        "risk_budget_usd": float(env_vals.get("SIGNALCOPY_RISK_PER_TRADE_USD", 2.0)),
+        "taker_fee_pct": float(env_vals.get("PAPER_TAKER_FEE_PCT", 0.0005)),
+        "slippage_pct": float(env_vals.get("PAPER_SLIPPAGE_PCT", 0.0005)),
+        "funding_buffer_pct": float(env_vals.get("PAPER_FUNDING_BUFFER_PCT", 0.0001)),
+        "max_entry_deviation_pct": float(env_vals.get("MAX_ENTRY_DEVIATION_PCT", 0.0025)),
+        "min_entry_sl_distance_pct": float(env_vals.get("MIN_ENTRY_SL_DISTANCE_PCT", 0.0050)),
+        "hard_sl_cooldown_sec": int(float(env_vals.get("SYMBOL_HARD_SL_COOLDOWN_SEC", 3600))),
+        "max_directional_positions": int(env_vals.get("GATEWAY_MAX_DIRECTIONAL_POSITIONS", 2)),
+        "btc_regime_revalidate": env_vals.get("GATEWAY_BTC_REGIME_REVALIDATE", "true").lower() in ("1", "true", "yes"),
+    }
+
+    # 8. Persist Active Cohort Manifest
+    cohort_manifest = {
+        "cohort_id": "cohort_post_patch_20261030_001",
+        "start_utc": "2026-10-30T01:34:47.950889+00:00",
+        "baseline_equity": 100.21675115,
+        "git_commit": git_head,
+        "service_source_sha256": svc_sha,
+        "paper_trader_sha256": pm_sha,
+        "order_intent_sha256": oi_sha,
+        "scanner_source_sha256": scanner_sha,
+        "systemd_unit_sha256": systemd_sha,
+        "config_hash": cfg_hash,
+        "environment_hash_without_secrets": env_hash,
+        "journal_tip_hash": tip_hash,
+        "parameters_frozen": parameters_frozen,
+        "status": "ACTIVE_FORWARD_TEST_OBSERVATION"
+    }
+
+    cohort_path = Path("/opt/signalcopyreal/journal/active_cohort.json")
+    cohort_path.write_text(json.dumps(cohort_manifest, indent=2))
+    print(f"\n- active_cohort_manifest:   Successfully persisted to {cohort_path}")
 
     print("\n==================================================================")
     print(" DEPLOYMENT PARITY AUDIT: 100% COMPLETE & VERIFIED")

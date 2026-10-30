@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import os
@@ -8,7 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from gateway.order_intent import OrderIntent
-from gateway.service import ExecutionGateway, _classify_reject_layer, verify_rejected_intents_journal, _compute_event_hash
+from gateway.service import ExecutionGateway, _classify_reject_layer, verify_rejected_intents_journal, _compute_event_hash, recover_journal_after_crash
 from execution.paper_mainnet_trader import PaperMainnetTrader, RISK_OVERRUN_TOLERANCE_USD
 from scripts.replay_rejected_intents import run_replay
 
@@ -329,6 +330,148 @@ class TestScoreInvarianceAndNetRisk(unittest.TestCase):
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
+
+
+    def test_final_line_valid_json_with_bad_hash_refused(self):
+        """Verify that a complete, valid JSON final record with a mismatched hash is REJECTED
+        as a tamper attempt and NEVER truncated as a crash tail."""
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tmp:
+            tmp_path = Path(tmp.name)
+
+        try:
+            prev = "0" * 64
+            records = []
+            for i in range(2):
+                payload = {
+                    "schema_version": 2,
+                    "intent_id": f"rec_{i}",
+                    "symbol": "BTCUSDT",
+                    "side": "LONG",
+                    "entry": 50000.0,
+                    "sl": 49000.0,
+                    "previous_event_hash": prev,
+                }
+                h = _compute_event_hash(prev, payload)
+                payload["event_hash"] = h
+                records.append(payload)
+                prev = h
+
+            # 3rd record: valid JSON syntax, but forged event_hash
+            bad_record = {
+                "schema_version": 2,
+                "intent_id": "forged_tail",
+                "symbol": "BTCUSDT",
+                "side": "LONG",
+                "entry": 50000.0,
+                "sl": 49000.0,
+                "previous_event_hash": prev,
+                "event_hash": "f" * 64,  # mismatched hash!
+            }
+            records.append(bad_record)
+
+            file_content = "\n".join(json.dumps(r, separators=(",", ":")) for r in records) + "\n"
+            tmp_path.write_text(file_content, encoding="utf-8")
+            bytes_before = tmp_path.stat().st_size
+
+            # Attempt recovery
+            recovered, valid_count, msg = recover_journal_after_crash(tmp_path)
+            self.assertFalse(recovered, "Must refuse to recover valid JSON with forged hash")
+            self.assertIn("tamper_refusal", msg)
+
+            # Ensure file was NOT truncated
+            bytes_after = tmp_path.stat().st_size
+            self.assertEqual(bytes_before, bytes_after, "File must remain untouched when tamper detected")
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+    def test_fail_closed_on_journal_write_failure(self):
+        """Fault-injection test: verify that a journal write failure transitions the gateway
+        into AUDIT_DEGRADED mode, blocking all subsequent order submissions (fail-closed)."""
+        class DummyTrader:
+            def __init__(self):
+                self.orders = []
+            async def submit_open(self, **kwargs):
+                self.orders.append(kwargs)
+                return {"ok": True, "position_confirmed": True, "entry_price": 50000.0, "notional": 100.0}
+
+        class DummyRiskMgr:
+            def check_risk_limits(self, **kwargs):
+                return {"can_trade": True}
+            def get_max_running_positions(self):
+                return 10
+            def _position_count(self):
+                return 0
+            async def reserve_open_risk_details(self, symbol, risk):
+                return {"reserved": True, "code": "OK"}
+            async def release_open_risk(self, symbol):
+                pass
+            def get_current_equity(self):
+                return 100.0
+            async def commit_open_trade(self, symbol, **kwargs):
+                pass
+
+        gw = ExecutionGateway(DummyTrader(), DummyRiskMgr())
+
+        # Inject fault into REJECTED_INTENTS_PATH
+        with patch.object(Path, "open", side_effect=IOError("Simulated disk I/O failure")):
+            # Create an intent that will be rejected by validation (SL distance zero)
+            bad_intent = OrderIntent(
+                source="MANUAL",
+                intent_id="fault_intent_001",
+                symbol="BTCUSDT",
+                side="LONG",
+                entry_price=50000.0,
+                sl_price=50000.0,  # invalid geometry
+                notional=50.0,
+            )
+            res1 = asyncio.run(gw.execute(bad_intent))
+            self.assertFalse(res1.ok)
+
+            # Gateway must trigger fail-closed AUDIT_DEGRADED mode
+            self.assertTrue(gw.audit_degraded)
+            self.assertGreaterEqual(gw.journal_write_failures, 1)
+
+        # Now submit a perfectly valid intent while audit_degraded is True
+        valid_intent = OrderIntent(
+            source="MANUAL",
+            intent_id="valid_intent_blocked",
+            symbol="BTCUSDT",
+            side="LONG",
+            entry_price=50000.0,
+            sl_price=49000.0,
+            notional=50.0,
+        )
+        res2 = asyncio.run(gw.execute(valid_intent))
+        self.assertFalse(res2.ok, "Valid intent must be blocked when gateway is in AUDIT_DEGRADED mode")
+        self.assertIn("GATEWAY_AUDIT_DEGRADED", res2.reason)
+        self.assertEqual(len(gw.trader.orders), 0, "Zero orders may be submitted while AUDIT_DEGRADED")
+
+    def test_granular_execution_counters(self):
+        """Verify that ExecutionGateway exposes all granular audit counters in portfolio."""
+        class DummyTrader:
+            pass
+        class DummyRiskMgr:
+            def get_open_positions(self):
+                return {}
+            def get_current_equity(self):
+                return 100.0
+            def get_metrics(self):
+                return {}
+
+        gw = ExecutionGateway(DummyTrader(), DummyRiskMgr())
+        port = gw.portfolio()
+        self.assertIn("audit_counters", port)
+        counters = port["audit_counters"]
+
+        expected_keys = [
+            "intents_received", "intents_rejected", "intents_eligible",
+            "orders_submitted", "orders_filled", "orders_partially_filled",
+            "orders_cancelled", "duplicate_intents_suppressed",
+            "journal_write_failures", "journal_write_retries", "audit_degraded"
+        ]
+        for k in expected_keys:
+            self.assertIn(k, counters, f"Missing required counter: {k}")
 
 
 if __name__ == "__main__":
