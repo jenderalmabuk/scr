@@ -1638,6 +1638,7 @@ class PaperMainnetTrader:
         pos = self.positions.get(symbol)
         if not pos:
             return
+        side = str(pos.get("side", "")).upper()
         ladder = pos.get("tp_ladder") or [pos.get("tp1_price")]
         idx = int(pos.get("next_tp_index", 0))
         while idx < len(ladder):
