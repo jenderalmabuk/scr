@@ -1055,7 +1055,10 @@ class PaperMainnetTrader:
         qty = notional / fill if fill > 0 else 0
         adverse_sl_fill = self._adverse_fill(sl_price, side, opening=False)
         stop_gross_loss = abs(fill - adverse_sl_fill) * qty
-        max_loss_at_fill = stop_gross_loss + self._fee(fill * qty) + self._fee(adverse_sl_fill * qty)
+        entry_fee_est = self._fee(fill * qty)
+        exit_fee_est = self._fee(adverse_sl_fill * qty)
+        funding_buf_est = notional * float(os.getenv("PAPER_FUNDING_BUFFER_PCT", "0.0001"))
+        max_loss_at_fill = stop_gross_loss + entry_fee_est + exit_fee_est + funding_buf_est
         # Unified Sizing Path:
         # Respect planned_risk_amount passed from Gateway, or SIGNALCOPY_RISK_PER_TRADE_USD
         planned_risk = float(params.get("planned_risk_amount") or params.get("risk_amount") or params.get("target_risk_usd") or 0.0)
@@ -1078,11 +1081,10 @@ class PaperMainnetTrader:
             notional *= scale
             qty = notional / fill
             stop_gross_loss = abs(fill - adverse_sl_fill) * qty
-            max_loss_at_fill = (
-                stop_gross_loss
-                + self._fee(fill * qty)
-                + self._fee(adverse_sl_fill * qty)
-            )
+            entry_fee_est = self._fee(fill * qty)
+            exit_fee_est = self._fee(adverse_sl_fill * qty)
+            funding_buf_est = notional * float(os.getenv("PAPER_FUNDING_BUFFER_PCT", "0.0001"))
+            max_loss_at_fill = stop_gross_loss + entry_fee_est + exit_fee_est + funding_buf_est
         if qty <= 0 or max_loss_at_fill <= 0:
             return {"ok": False, "executed": False, "code": "INVALID_ACTUAL_FILL_RISK",
                     "reason": "INVALID_ACTUAL_FILL_RISK"}
@@ -1154,6 +1156,16 @@ class PaperMainnetTrader:
             "qty_remaining": qty_opened,
             "symbol": symbol, "side": side, "entry_price": fill,
             "sl_price": sl_price, "provider_sl_original": sl_price,
+            "planned_risk_usd": planned_risk,
+            "planned_notional": notional,
+            "requested_qty": (notional / requested_entry) if requested_entry > 0 else qty,
+            "filled_qty": qty,
+            "actual_notional": fill * qty,
+            "actual_risk_usd": max_loss_at_fill,
+            "stop_gross_loss": stop_gross_loss,
+            "estimated_fees": entry_fee_est + exit_fee_est,
+            "estimated_slippage": abs(adverse_sl_fill - sl_price) * qty,
+            "estimated_funding_buffer": funding_buf_est,
             "tp1_price": tp1, "tp_ladder": tp_ladder,
             "next_tp_index": 0, "initial_qty": qty,
             "qty": qty, "notional": notional, "leverage": leverage, "regime": regime,
@@ -1965,22 +1977,27 @@ class PaperMainnetTrader:
         except Exception as e:
             logger.warning("[PAPER] equity sync failed for %s: %s", symbol, e)
 
-        # Fire-and-forget close notification to the trades channel (was never sent).
+        notify_payload = {
+            "symbol": symbol, "side": side, "reason": reason,
+            "entry_price": entry, "qty": qty,
+            "signal_entry_price": pos.get("signal_entry_price", entry),
+            "notional_usd": float(pos.get("notional", notional)), "rr": rr,
+            "normalized_reason": reason, "exit_price": actual_exit,
+            "gross_pnl_usd": gross_pnl, "fee_usd": entry_fee + exit_fee,
+            "pnl_pct": pnl_pct, "pnl_usd": realized_net_pnl, "hold_minutes": hold_min,
+            "equity": equity_after if equity_after is not None else 0.0,
+            "sl_original": pos.get("provider_sl_original", pos["sl_price"]),
+            "active_sl_at_exit": pos.get("sl", pos["sl_price"]),
+            "sl_kind_at_exit": pos.get("sl_kind", "ORIGINAL"),
+            "footer": "Fusion Quantum Dry-Run" if str(pos.get("tag", "")).startswith("fusion_quantum") else "",
+        }
+
+        # Runtime Safety Assertion: Verify raw mathematical parity
+        self._verify_raw_parity_assertions(journal_entry=pos, notify_payload=notify_payload)
+
+        # Fire-and-forget close notification to the trades channel
         try:
-            asyncio.create_task(self._notify_close({
-                "symbol": symbol, "side": side, "reason": reason,
-                "entry_price": entry, "qty": qty,
-                "signal_entry_price": pos.get("signal_entry_price", entry),
-                "notional_usd": float(pos.get("notional", notional)), "rr": rr,
-                "normalized_reason": reason, "exit_price": actual_exit,
-                "gross_pnl_usd": gross_pnl, "fee_usd": entry_fee + exit_fee,
-                "pnl_pct": pnl_pct, "pnl_usd": realized_net_pnl, "hold_minutes": hold_min,
-                "equity": equity_after if equity_after is not None else 0.0,
-                "sl_original": pos.get("provider_sl_original", pos["sl_price"]),
-                "active_sl_at_exit": pos.get("sl", pos["sl_price"]),
-                "sl_kind_at_exit": pos.get("sl_kind", "ORIGINAL"),
-                "footer": "Fusion Quantum Dry-Run" if str(pos.get("tag", "")).startswith("fusion_quantum") else "",
-            }))
+            asyncio.create_task(self._notify_close(notify_payload))
         except Exception as e:
             logger.warning("[PAPER] close-notify dispatch failed for %s: %s", symbol, e)
 
@@ -2025,6 +2042,29 @@ class PaperMainnetTrader:
             raise
         logger.info(f"[PAPER] {symbol} take profit updated: old={old_tps} -> new={pos['tp_prices']}")
         return {"ok": True, "code": "TP_UPDATED", "old_tps": old_tps, "new_tps": pos['tp_prices']}
+
+    def _verify_raw_parity_assertions(self, journal_entry: Dict[str, Any], notify_payload: Dict[str, Any]) -> None:
+        """Assert strict numeric parity between journal data and telegram notification payload."""
+        checks = [
+            ("entry_price", journal_entry.get("entry_price"), notify_payload.get("entry_price")),
+            ("exit_price", journal_entry.get("exit_price", notify_payload.get("exit_price")), notify_payload.get("exit_price")),
+            ("qty", float(journal_entry.get("qty", 0.0)), float(notify_payload.get("qty", 0.0))),
+            ("gross_pnl_usd", float(journal_entry.get("gross_pnl_usd", notify_payload.get("gross_pnl_usd"))), float(notify_payload.get("gross_pnl_usd", 0.0))),
+            ("pnl_usd", float(journal_entry.get("pnl_usd", notify_payload.get("pnl_usd"))), float(notify_payload.get("pnl_usd", 0.0))),
+            ("fee_usd", float(journal_entry.get("fee_usd", notify_payload.get("fee_usd"))), float(notify_payload.get("fee_usd", 0.0))),
+        ]
+        mismatches = []
+        for name, j_val, n_val in checks:
+            if j_val is not None and n_val is not None:
+                try:
+                    diff = abs(float(j_val) - float(n_val))
+                    if diff > 1e-6:
+                        mismatches.append(f"{name}: journal={j_val} != notify={n_val} (diff={diff:.8f})")
+                except (ValueError, TypeError):
+                    pass
+        if mismatches:
+            logger.error("[ALARM] NOTIFICATION_PARITY_MISMATCH on %s: %s",
+                         notify_payload.get("symbol"), " | ".join(mismatches))
 
     async def close_position(self, symbol: str, reason: str = "PROVIDER_CLOSE") -> Dict[str, Any]:
         pos = self.positions.get(symbol)

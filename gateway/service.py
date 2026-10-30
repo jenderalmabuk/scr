@@ -20,15 +20,64 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import hashlib
+import json
 import logging
 import os
+import subprocess
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from gateway.order_intent import OrderIntent
 from execution.manual_signal_tools import fetch_manual_signal_context, normalize_manual_tp_ladder
 
 logger = logging.getLogger("gateway")
+
+REJECTED_INTENTS_PATH = Path(os.getenv("REJECTED_INTENTS_PATH", "/opt/signalcopyreal/journal/rejected_intents.jsonl"))
+
+
+def _get_active_code_hash() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).resolve().parent),
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        return "head"
+
+
+def _get_active_config_hash() -> str:
+    keys = [
+        "SIGNALCOPY_RISK_PER_TRADE_USD", "STARTING_BALANCE", "MAX_ENTRY_DEVIATION_PCT",
+        "MIN_ENTRY_SL_DISTANCE_PCT", "SYMBOL_HARD_SL_COOLDOWN_SEC", "GATEWAY_BTC_REGIME_REVALIDATE",
+        "GATEWAY_MAX_DIRECTIONAL_POSITIONS", "GATEWAY_MAX_POSITION_LEVERAGE"
+    ]
+    blob = "|".join(f"{k}={os.getenv(k, '')}" for k in sorted(keys))
+    return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+
+def _classify_reject_layer(reason: str) -> str:
+    r = (reason or "").upper()
+    if "REGIME_FLIPPED" in r or "BTC IN" in r:
+        return "DIRECTIONAL_REGIME_GATE"
+    if "COOLDOWN" in r:
+        return "COOLDOWN_GUARD"
+    if "DIRECTIONAL_EXPOSURE" in r:
+        return "CORRELATION_GUARD"
+    if "RUNNING POSITIONS" in r:
+        return "PORTFOLIO_CAP"
+    if "ENTRY_CHASE" in r or "DEVIATION" in r:
+        return "EXECUTION_PRICE_GUARD"
+    if "TOO_CLOSE_TO_FILL" in r or "INSTANT_STOP" in r:
+        return "SL_DISTANCE_GUARD"
+    if "PRICE_PROVENANCE" in r or "STALE_GATEWAY_MARK" in r or "NO_MARKET_PRICE" in r:
+        return "PROVENANCE_GUARD"
+    if "RISK" in r or "CAP" in r or "EQUITY" in r:
+        return "RISK_MANAGER"
+    return "GATEWAY_SAFETY"
 
 
 def trader_rejected(response) -> bool:
@@ -147,9 +196,24 @@ class ExecutionGateway:
                 btc_info = await gate.get_btc_regime()
                 reg = str(btc_info.get("regime", "")).upper()
                 diff = float(btc_info.get("diff_pct", 0.0))
+                observed_ts = btc_info.get("timestamp", time.time())
+                observed_iso = datetime.fromtimestamp(observed_ts, tz=timezone.utc).isoformat()
+                now_iso = datetime.now(timezone.utc).isoformat()
                 if reg in ("PUMP", "STRONG_BULLISH") or diff > 0.35:
+                    flip_ts = btc_info.get("timestamp", time.time())
+                    flip_iso = datetime.fromtimestamp(flip_ts, tz=timezone.utc).isoformat()
                     res.reason = f"REGIME_FLIPPED_BEFORE_FILL: BTC in {reg} regime (+{diff:.2f}% above VWAP)"
-                    logger.warning("[GATEWAY] %s %s blocked: %s", symbol, side, res.reason)
+                    if intent.adv_snapshot is None:
+                        intent.adv_snapshot = {}
+                    intent.adv_snapshot.update({
+                        "regime_observed_at": observed_iso,
+                        "decision_at": now_iso,
+                        "regime_flip_at": flip_iso,
+                        "order_created_at": getattr(intent, "timestamp", now_iso),
+                        "fill_at": None,
+                    })
+                    logger.warning("[GATEWAY] %s %s blocked: %s (observed_at=%s flip_at=%s)",
+                                   symbol, side, res.reason, observed_iso, flip_iso)
                     return self._record(intent, res)
             except Exception as exc:
                 logger.debug("[GATEWAY] btc regime revalidation check skipped: %s", exc)
@@ -379,6 +443,7 @@ class ExecutionGateway:
         """USD loss if HARD_SL hits: entry slip already in price, exit adverse@SL + both fees."""
         fee = max(0.0, float(os.getenv("PAPER_TAKER_FEE_PCT", "0.0005")))
         slip = max(0.0, float(os.getenv("PAPER_SLIPPAGE_PCT", "0.0005")))
+        funding_buf = max(0.0, float(os.getenv("PAPER_FUNDING_BUFFER_PCT", "0.0001")))
         qty = float(notional) / max(float(slipped_entry), 1e-9)
         if side == "LONG":
             adverse_exit = float(sl) * (1.0 - slip)
@@ -388,7 +453,8 @@ class ExecutionGateway:
             gross = (float(slipped_entry) - adverse_exit) * qty
         entry_fee = abs(float(notional)) * fee
         exit_fee = abs(adverse_exit * qty) * fee
-        return max(0.0, -gross + entry_fee + exit_fee)
+        funding = abs(float(notional)) * funding_buf
+        return max(0.0, -gross + entry_fee + exit_fee + funding)
 
     async def _paper_econ_size(
         self, symbol: str, side: str, entry: float, sl: float, notional: float, source: str,
@@ -429,10 +495,16 @@ class ExecutionGateway:
         # Leveraged futures position sizing cap:
         # Allow position leverage up to GATEWAY_MAX_POSITION_LEVERAGE (default 3.5x equity, max $350)
         # instead of clamping to spot 20% equity ($19.40).
+        # Net risk fraction calculation incorporating fees, adverse stop slippage, and funding buffer
+        fee_rate = max(0.0, _safe_float(os.getenv("GATEWAY_FEE_PCT", os.getenv("PAPER_TAKER_FEE_PCT", "0.0")), 0.0))
+        slip_rate = max(0.0, _safe_float(os.getenv("GATEWAY_SLIPPAGE_PCT", os.getenv("PAPER_SLIPPAGE_PCT", "0.0")), 0.0))
+        funding_buf_frac = max(0.0, _safe_float(os.getenv("GATEWAY_FUNDING_PCT", os.getenv("PAPER_FUNDING_BUFFER_PCT", "0.0")), 0.0))
+        total_risk_frac = sl_frac + (2.0 * fee_rate) + slip_rate + funding_buf_frac
+
         max_pos_lev = max(1.0, _safe_float(os.getenv("GATEWAY_MAX_POSITION_LEVERAGE"), 3.5))
         max_notional_env = max(10.0, _safe_float(os.getenv("GATEWAY_MAX_NOTIONAL_USD"), 350.0))
         notional_cap = min(equity * max_pos_lev, max_notional_env) if equity > 0 else None
-        risk_notional_cap = risk_cap_usd / sl_frac
+        risk_notional_cap = risk_cap_usd / max(total_risk_frac, 1e-6)
         min_notional = max(0.0, _safe_float(os.getenv("GATEWAY_MIN_NOTIONAL_USD"), 10.0))
 
         if intent.notional is not None:
@@ -441,14 +513,14 @@ class ExecutionGateway:
             if equity <= 0:
                 return 0.0, 0.0, "equity is zero"
             risk_budget = min(equity * float(intent.risk_pct), risk_cap_usd)
-            notional = risk_budget / sl_frac
+            notional = risk_budget / max(total_risk_frac, 1e-6)
 
         notional = min(notional, risk_notional_cap)
         if notional_cap is not None:
             notional = min(notional, notional_cap)
 
         if min_notional > 0 and notional < min_notional:
-            min_risk = min_notional * sl_frac
+            min_risk = min_notional * total_risk_frac
             if min_risk > risk_cap_usd:
                 return 0.0, 0.0, (
                     f"min order notional ${min_notional:.2f} would risk ${min_risk:.2f}, "
@@ -456,8 +528,8 @@ class ExecutionGateway:
                 )
             notional = min_notional
 
-        risk_amount = notional * sl_frac
-        if risk_amount > risk_cap_usd + 1e-9:
+        risk_amount = notional * total_risk_frac
+        if risk_amount > risk_cap_usd + 1e-6:
             return 0.0, 0.0, f"sizing exceeds strict ${risk_cap_usd:.2f} risk cap"
         return notional, risk_amount, None
 
@@ -556,4 +628,50 @@ class ExecutionGateway:
             self.history = self.history[-self._history_max:]
         if not res.ok:
             logger.info("[GATEWAY] REJECTED %s src=%s: %s", intent.symbol, intent.source, res.reason)
+            self._append_rejected_intent(intent, res)
         return res
+
+    def _append_rejected_intent(self, intent: OrderIntent, res: GatewayResult) -> None:
+        try:
+            REJECTED_INTENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            snapshot = dict(intent.adv_snapshot or {})
+            raw_score = _safe_float(snapshot.get("raw_score", snapshot.get("score")), 0.0)
+            final_score = _safe_float(snapshot.get("final_score", snapshot.get("score")), 0.0)
+            tp_list = []
+            tps_raw = getattr(intent, "tps", None) or getattr(intent, "tp_ladder", None) or []
+            if tps_raw:
+                tp_list = [float(tp) for tp in tps_raw if tp]
+            elif getattr(intent, "tp_full", None):
+                tp_list = [float(intent.tp_full)]
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            regime_observed = snapshot.get("regime_observed_at") or snapshot.get("price_observed_at") or now_iso
+            sig_id = getattr(intent, "signal_id", None) or snapshot.get("signal_id") or getattr(intent, "tag", None) or getattr(intent, "intent_id", "")
+            payload = {
+                "signal_id": str(sig_id or ""),
+                "intent_id": str(intent.intent_id or ""),
+                "decision_timestamp": now_iso,
+                "reject_layer": _classify_reject_layer(res.reason),
+                "primary_reason": str(res.reason or "UNKNOWN"),
+                "all_reasons": [str(res.reason or "UNKNOWN")],
+                "symbol": str(intent.symbol or ""),
+                "side": str(intent.side or ""),
+                "entry": float(intent.entry_price or 0.0),
+                "sl": float(intent.sl_price or 0.0),
+                "tp": tp_list,
+                "score_raw": raw_score,
+                "score_final": final_score,
+                "regime_snapshot": {
+                    "regime": str(intent.regime or snapshot.get("regime", "UNKNOWN")),
+                    "decision_at": snapshot.get("decision_at") or now_iso,
+                    "regime_observed_at": regime_observed,
+                    "regime_flip_at": snapshot.get("regime_flip_at"),
+                    "order_created_at": snapshot.get("order_created_at") or now_iso,
+                },
+                "config_hash": _get_active_config_hash(),
+                "code_hash": _get_active_code_hash(),
+            }
+            with REJECTED_INTENTS_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, default=str, separators=(",", ":")) + "\n")
+        except Exception as exc:
+            logger.warning("[GATEWAY] failed to append rejected intent: %s", exc)
