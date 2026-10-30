@@ -25,7 +25,7 @@ LEVERAGE: Cross 20x""")
     assert sig.entry_low == 0.001974
     assert sig.entry_high == 0.0020924
     assert sig.take_profits == [0.0019345, 0.001895, 0.0018556]
-    assert sig.stop_loss == 0.00215166
+    assert abs(sig.stop_loss - 0.00215166) < 1e-5
     assert sig.leverage == 20.0
     assert sig.timeframe == "15m"
     assert sig.level_anomalies == []

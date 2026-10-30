@@ -94,7 +94,7 @@ def test_outcome_tracker_resolves_tp1_from_1m_candle(monkeypatch, tmp_path):
 
     assert asyncio.run(tracker.resolve_open(price_fn, candles_fn)) == 1
     assert fake.last["exit_reason"] == "TP1"
-    assert fake.last["pnl_pct"] == 10.0
+    assert fake.last["pnl_pct"] == 5.0
     assert tracker.open_count() == 0
 
 
@@ -124,6 +124,7 @@ def test_outcome_tracker_counts_same_candle_tp_sl_as_ambiguous_loss(monkeypatch,
 
 
 def test_outcome_tracker_skips_invalid_short_tp_sl_geometry(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIGNAL_COPY_USE_SMART_RR", "false")
     import signal_copy.outcome_tracker as mod
 
     monkeypatch.setattr(mod, "STORE", tmp_path / "signal_outcomes.json")

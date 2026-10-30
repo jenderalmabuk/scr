@@ -29,7 +29,9 @@ def test_committee_flags_all_targets_passed_without_blocking_shadow(monkeypatch)
 
 
 def test_committee_flags_bad_rr(monkeypatch):
+    monkeypatch.setenv("SIGNAL_COPY_USE_SMART_RR", "false")
     monkeypatch.setattr("signal_copy.signal_copy_config.COMMITTEE_MODE", "shadow")
+    monkeypatch.setattr("signal_copy.signal_copy_config.COMMITTEE_MIN_NO_VOTES", 1)
     sig = _signal(entry=100.0, sl=90.0, tps=[105.0])
     decision = evaluate_committee(sig, _result(sig), {"price": 100.0})
 

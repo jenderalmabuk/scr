@@ -236,6 +236,11 @@ class ExecutionGateway:
         self._symbol_sl_times: Dict[str, float] = {}
         self._seen_rejected_intent_ids: set = set()
         self._last_reject_event_hash: Optional[str] = None
+        self.accepted_intents_count: int = 0
+        self.rejected_intents_count: int = 0
+        self.journal_write_failures: int = 0
+        self.journal_write_retries: int = 0
+        self.duplicate_intents_suppressed: int = 0
         self._rebuild_seen_rejected_intents()
 
     # ── public API ───────────────────────────────────────────
@@ -516,6 +521,13 @@ class ExecutionGateway:
         except Exception:
             out["open_positions"] = []
         out["recent_intents"] = self.history[-20:]
+        out["audit_counters"] = {
+            "accepted_intents_count": self.accepted_intents_count,
+            "rejected_intents_count": self.rejected_intents_count,
+            "journal_write_failures": self.journal_write_failures,
+            "journal_write_retries": self.journal_write_retries,
+            "duplicate_intents_suppressed": self.duplicate_intents_suppressed,
+        }
         return out
 
     # ── internals ────────────────────────────────────────────
@@ -724,8 +736,11 @@ class ExecutionGateway:
         if len(self.history) > self._history_max:
             self.history = self.history[-self._history_max:]
         if not res.ok:
+            self.rejected_intents_count += 1
             logger.info("[GATEWAY] REJECTED %s src=%s: %s", intent.symbol, intent.source, res.reason)
             self._append_rejected_intent(intent, res)
+        else:
+            self.accepted_intents_count += 1
         return res
 
     def _rebuild_seen_rejected_intents(self) -> None:
@@ -822,6 +837,7 @@ class ExecutionGateway:
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 try:
                     if intent_id and intent_id in self._seen_rejected_intent_ids:
+                        self.duplicate_intents_suppressed += 1
                         logger.debug("[GATEWAY] duplicate rejected intent_id %s suppressed from journal", intent_id)
                         return
                     if intent_id:
@@ -855,4 +871,5 @@ class ExecutionGateway:
                     if fcntl is not None:
                         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except Exception as exc:
-            logger.warning("[GATEWAY] failed to append rejected intent: %s", exc)
+            self.journal_write_failures += 1
+            logger.critical("[ALARM] JOURNAL_WRITE_FAILURE on %s %s: %s", getattr(intent, 'symbol', ''), intent_id, exc)

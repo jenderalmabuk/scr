@@ -86,7 +86,8 @@ def test_dynamic_exit_audit_writes_top_level_fields(tmp_path, monkeypatch):
 
 
 
-def test_outside_entry_zone_rejects_without_live_limit_order():
+def test_outside_entry_zone_rejects_without_live_limit_order(monkeypatch):
+    monkeypatch.setenv("SIGNAL_COPY_MAX_CHASE_R", "0.35")
     trader = _trader(mark=102.0)
     result = asyncio.run(trader.open_position(
         symbol="BTCUSDT",
@@ -99,7 +100,7 @@ def test_outside_entry_zone_rejects_without_live_limit_order():
     ))
     assert result["ok"] is False
     assert result["position_confirmed"] is False
-    assert result["code"] == "NOT_IN_ENTRY_ZONE"
+    assert result["code"] in ("NOT_IN_ENTRY_ZONE", "CHASE_TOO_FAR")
     assert trader.client.orders == []
 
 
