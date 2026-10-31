@@ -39,7 +39,20 @@ from execution.manual_signal_tools import fetch_manual_signal_context, normalize
 
 logger = logging.getLogger("gateway")
 
-REJECTED_INTENTS_PATH = Path(os.getenv("REJECTED_INTENTS_PATH", "/opt/signalcopyreal/journal/rejected_intents.jsonl"))
+def _resolve_rejected_intents_path() -> Path:
+    env_path = os.getenv("REJECTED_INTENTS_PATH")
+    if env_path:
+        return Path(env_path)
+    container_journal = Path("/app/journal")
+    if container_journal.exists() and container_journal.is_dir():
+        return container_journal / "rejected_intents.jsonl"
+    bot_journal_dir = os.getenv("BOT_JOURNAL_DIR")
+    if bot_journal_dir:
+        return Path(bot_journal_dir) / "rejected_intents.jsonl"
+    return Path("/opt/signalcopyreal/journal/rejected_intents.jsonl")
+
+
+REJECTED_INTENTS_PATH = _resolve_rejected_intents_path()
 
 
 def _get_active_code_hash() -> str:
@@ -836,7 +849,11 @@ class ExecutionGateway:
         try:
             intent_id = str(intent.intent_id or "")
 
-            REJECTED_INTENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if not REJECTED_INTENTS_PATH.parent.exists():
+                try:
+                    REJECTED_INTENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
             snapshot = dict(intent.adv_snapshot or {})
             raw_score = _safe_float(snapshot.get("raw_score", snapshot.get("score")), 0.0)
             final_score = _safe_float(snapshot.get("final_score", snapshot.get("score")), 0.0)
