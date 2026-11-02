@@ -430,31 +430,23 @@ class AutonomousMarketScanner:
             logger.info("[ADVERSARIAL VETO] %s SHORT rejected by flow_dir=LONG_ONLY", symbol)
             return None
 
-        # Directional Flow Discipline:
-        # BOTH_ALLOWED or NEUTRAL is NOT a directional confirmation for SHORT.
-        is_flow_confirmed = False
-        if side == "SHORT":
-            if flow_dir in ("SHORT_ONLY", "STRONG_SELL"):
-                is_flow_confirmed = True
-            elif flow_dir in ("BOTH_ALLOWED", "NEUTRAL"):
-                cvd_delta = float((flow_data or {}).get("cvd_delta_usd", 0.0))
-                taker_ratio = float((flow_data or {}).get("taker_buy_ratio", 0.50))
-                if cvd_delta > 50000 or taker_ratio > 0.55:
-                    logger.info("[ADVERSARIAL VETO] %s SHORT rejected: flow is %s but taker flow is bullish (delta=+$%.0f, taker_ratio=%.2f)",
-                                symbol, flow_dir, cvd_delta, taker_ratio)
-                    return None
-                is_flow_confirmed = False
-        elif side == "LONG":
-            if flow_dir in ("LONG_ONLY", "STRONG_BUY"):
-                is_flow_confirmed = True
-            elif flow_dir in ("BOTH_ALLOWED", "NEUTRAL"):
-                cvd_delta = float((flow_data or {}).get("cvd_delta_usd", 0.0))
-                taker_ratio = float((flow_data or {}).get("taker_buy_ratio", 0.50))
-                if cvd_delta < -50000 or taker_ratio < 0.45:
-                    logger.info("[ADVERSARIAL VETO] %s LONG rejected: flow is %s but taker flow is bearish (delta=-$%.0f, taker_ratio=%.2f)",
-                                symbol, flow_dir, abs(cvd_delta), taker_ratio)
-                    return None
-                is_flow_confirmed = False
+        # Strict Directional Flow Gate:
+        # BOTH_ALLOWED, NEUTRAL, UNKNOWN, or null is STRICTLY REJECTED for new entries.
+        # Long requires confirmed LONG_ONLY or STRONG_BUY.
+        # Short requires confirmed SHORT_ONLY or STRONG_SELL.
+        if side == "LONG":
+            if flow_dir not in ("LONG_ONLY", "STRONG_BUY"):
+                logger.info("[DIRECTIONAL GATE VETO] %s LONG rejected by flow_dir=%s (must be LONG_ONLY or STRONG_BUY)", symbol, flow_dir)
+                return None
+            is_flow_confirmed = True
+        elif side == "SHORT":
+            if flow_dir not in ("SHORT_ONLY", "STRONG_SELL"):
+                logger.info("[DIRECTIONAL GATE VETO] %s SHORT rejected by flow_dir=%s (must be SHORT_ONLY or STRONG_SELL)", symbol, flow_dir)
+                return None
+            is_flow_confirmed = True
+        else:
+            logger.info("[DIRECTIONAL GATE VETO] %s invalid side %s", symbol, side)
+            return None
 
         oi_history = (oi_data or {}).get("data", [])
         if oi_history and len(oi_history) >= 2:
@@ -493,7 +485,18 @@ class AutonomousMarketScanner:
             "regime": "MTF_IFVG_PRO",
             "gap_atr": round(min_gap / atr_15m, 2),
             "strategy": "MTF_IFVG_PRO",
-            "tp_plan": "GOLDEN_SCALP"
+            "tp_plan": "GOLDEN_SCALP",
+            "ema20_1h": round(ema20_1h, 6),
+            "ema50_1h": round(ema50_1h, 6),
+            "ema20_15m": round(ema20_15m, 6),
+            "ema50_15m": round(ema50_15m, 6),
+            "atr_15m": round(atr_15m, 6),
+            "btc_regime": str(btc_regime),
+            "cvd_delta": float((flow_data or {}).get("cvd_delta_usd", 0.0)),
+            "taker_buy_ratio": float((flow_data or {}).get("taker_buy_ratio", 0.50)),
+            "oi_15m_pct": last_oi_delta if (oi_history and len(oi_history) >= 2) else 0.0,
+            "score": 0.88,
+            "confidence": 0.88,
         }
 
     async def execute_intent(self, setup: Dict[str, Any]) -> bool:
@@ -506,6 +509,7 @@ class AutonomousMarketScanner:
         target_risk_usd = 2.0  # $2.00 target risk per trade (2% on $100 capital)
         calculated_notional = round(target_risk_usd / sl_frac, 2)
 
+        now_ts = time.time()
         payload = {
             "source": "AUTONOMOUS_SCANNER",
             "symbol": symbol,
@@ -517,19 +521,36 @@ class AutonomousMarketScanner:
             "notional": calculated_notional,
             "regime": setup["regime"],
             "confidence": 0.88,
+            "score": 0.88,
             "tier": "Standard",
             "leverage": 10,
-            "tag": f"auto_ifvg_{symbol.lower()}_{int(time.time())}",
+            "tag": f"auto_ifvg_{symbol.lower()}_{int(now_ts)}",
             "adv_snapshot": {
-                "rsi": setup["rsi_15m"],
-                "flow_direction": setup["flow_dir"],
-                "sl_pct": setup["sl_pct"],
+                "symbol": symbol,
+                "side": side,
+                "decision_timestamp": now_ts,
+                "ema20_1h": setup.get("ema20_1h"),
+                "ema50_1h": setup.get("ema50_1h"),
+                "ema20_15m": setup.get("ema20_15m"),
+                "ema50_15m": setup.get("ema50_15m"),
+                "atr_15m": setup.get("atr_15m"),
+                "rsi": setup.get("rsi_15m"),
+                "rsi_15m": setup.get("rsi_15m"),
+                "flow_direction": setup.get("flow_dir"),
+                "cvd": setup.get("cvd_delta"),
+                "cvd_delta_usd": setup.get("cvd_delta"),
+                "taker_buy_ratio": setup.get("taker_buy_ratio"),
+                "oi_15m_pct": setup.get("oi_15m_pct"),
+                "btc_regime": setup.get("btc_regime"),
+                "sl_pct": setup.get("sl_pct"),
                 "strategy": "MTF_IFVG_PRO",
                 "tp_plan": "GOLDEN_SCALP",
                 "rr1": 1.5,
                 "rr2": 3.0,
                 "tp1_pct": 0.75,
-                "runner_pct": 0.25
+                "runner_pct": 0.25,
+                "score": 0.88,
+                "confidence": 0.88,
             }
         }
 

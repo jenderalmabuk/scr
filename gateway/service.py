@@ -273,6 +273,9 @@ class ExecutionGateway:
         self.journal_write_retries: int = 0
         self.audit_degraded: bool = False
         self.audit_degraded_reason: str = ""
+        self.entry_deviation_rejected: int = 0
+        self.fallback_fill_breached: int = 0
+        self.directional_gate_rejected: int = 0
         self._rebuild_seen_rejected_intents()
 
     @property
@@ -588,6 +591,9 @@ class ExecutionGateway:
             "audit_degraded": self.audit_degraded,
             "accepted_intents_count": self.accepted_intents_count,
             "rejected_intents_count": self.rejected_intents_count,
+            "entry_deviation_rejected": self.entry_deviation_rejected,
+            "fallback_fill_breached": self.fallback_fill_breached,
+            "directional_gate_rejected": self.directional_gate_rejected,
         }
         return out
 
@@ -778,6 +784,7 @@ class ExecutionGateway:
             "tag": intent.tag,
             "adv": dict(intent.adv_snapshot or {}),
             "adv_snapshot": dict(intent.adv_snapshot or {}),
+            "score": float(getattr(intent, "score", 0.0) or (intent.adv_snapshot or {}).get("score", 0.0) or 0.0),
         }
         if intent.leverage:
             payload["leverage"] = int(intent.leverage)
@@ -798,6 +805,13 @@ class ExecutionGateway:
             self.history = self.history[-self._history_max:]
         if not res.ok:
             self.intents_rejected += 1
+        r_upper = str(res.reason or "").upper()
+        if "ENTRY_CHASE" in r_upper or "DEVIATION" in r_upper:
+            self.entry_deviation_rejected += 1
+        if "DIRECTIONAL" in r_upper or "BOTH_ALLOWED" in r_upper:
+            self.directional_gate_rejected += 1
+        if "FALLBACK" in r_upper:
+            self.fallback_fill_breached += 1
             logger.info("[GATEWAY] REJECTED %s src=%s: %s", intent.symbol, intent.source, res.reason)
             self._append_rejected_intent(intent, res)
         return res

@@ -48,6 +48,7 @@ class OrderIntentBody(BaseModel):
     is_vip: bool = False
     leverage: Optional[int] = None
     tag: str = ""
+    score: float = 0.0
     adv_snapshot: Dict[str, Any] = Field(default_factory=dict)
     dry_run: bool = False
 

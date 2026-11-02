@@ -45,6 +45,7 @@ class OrderIntent:
     is_vip: bool = False
     leverage: Optional[int] = None
     tag: str = ""                     # free-form: setup name, signal id, …
+    score: float = 0.0
     adv_snapshot: Dict[str, Any] = field(default_factory=dict)
 
     # ── auto-filled ──────────────────────────────────────────

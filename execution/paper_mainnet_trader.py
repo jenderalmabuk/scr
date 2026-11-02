@@ -984,27 +984,32 @@ class PaperMainnetTrader:
         max_entry_dev = float(os.getenv("MAX_ENTRY_DEVIATION_PCT", "0.0025"))
         if requested_entry > 0 and mark > 0:
             drift = (mark - requested_entry) / requested_entry
-            if side == "SHORT" and drift > max_entry_dev:
-                logger.warning("[PAPER] %s SHORT adverse drift +%.4f%% > max %.4f%% (mark=%.6g req=%.6g) — reject",
-                               symbol, drift * 100.0, max_entry_dev * 100.0, mark, requested_entry)
+            dev_abs = abs(drift)
+            # Strict Symmetrical 2-Sided Pre-Fill Guard:
+            # Rejects both upward chase (+0.251%) and downward adverse drift (-0.251%)
+            if dev_abs > max_entry_dev:
+                logger.warning("[PAPER] %s %s mark entry deviation %.4f%% > max %.4f%% (mark=%.6g req=%.6g) — reject",
+                               symbol, side, dev_abs * 100.0, max_entry_dev * 100.0, mark, requested_entry)
                 return {"ok": False, "executed": False, "code": "ENTRY_CHASE_EXCEEDED",
-                        "reason": f"ENTRY_CHASE_EXCEEDED: SHORT drifted +{drift*100:.2f}% (max +{max_entry_dev*100:.2f}%) mark={mark:.6g} req={requested_entry:.6g}"}
-            if side == "LONG" and drift < -max_entry_dev:
-                logger.warning("[PAPER] %s LONG adverse drift %.4f%% < -max %.4f%% (mark=%.6g req=%.6g) — reject",
-                               symbol, drift * 100.0, max_entry_dev * 100.0, mark, requested_entry)
-                return {"ok": False, "executed": False, "code": "ENTRY_CHASE_EXCEEDED",
-                        "reason": f"ENTRY_CHASE_EXCEEDED: LONG drifted {drift*100:.2f}% (max -{max_entry_dev*100:.2f}%) mark={mark:.6g} req={requested_entry:.6g}"}
-            if abs(drift) > max_entry_dev * 2.5:
-                logger.warning("[PAPER] %s excessive mark divergence %.4f%% (mark=%.6g req=%.6g) — reject",
-                               symbol, drift * 100.0, mark, requested_entry)
-                return {"ok": False, "executed": False, "code": "STALE_GATEWAY_MARK",
-                        "reason": f"STALE_GATEWAY_MARK: drift={drift*100:.2f}% mark={mark:.6g} req={requested_entry:.6g}"}
+                        "reason": f"ENTRY_CHASE_EXCEEDED: {side} mark drifted {drift*100:+.2f}% (max ±{max_entry_dev*100:.2f}%) mark={mark:.6g} req={requested_entry:.6g}"}
         if mark <= 0:
             logger.warning("[PAPER] no mainnet price for %s — reject", symbol)
             return {"ok": False, "executed": False, "code": "NO_MARKET_PRICE",
                     "reason": "NO_MARKET_PRICE"}
         raw_fill = requested_entry if str(params.get("tag", "")).startswith("fusion_quantum") and requested_entry > 0 else mark
         fill = self._adverse_fill(raw_fill, side, opening=True)
+
+        # Post-Fill Deviation Verification:
+        # Simulated adverse slippage must NOT cause the executed fill to exceed max_entry_dev (0.25%).
+        # If it does, abort position creation BEFORE inserting into open_positions.
+        if requested_entry > 0 and fill > 0:
+            fill_drift = (fill - requested_entry) / requested_entry
+            fill_dev_abs = abs(fill_drift)
+            if fill_dev_abs > max_entry_dev:
+                logger.warning("[PAPER] %s %s post-fill deviation %.4f%% > max %.4f%% (fill=%.6g req=%.6g) — reject",
+                               symbol, side, fill_dev_abs * 100.0, max_entry_dev * 100.0, fill, requested_entry)
+                return {"ok": False, "executed": False, "code": "ENTRY_CHASE_EXCEEDED",
+                        "reason": f"ENTRY_CHASE_EXCEEDED: {side} post-fill drifted {fill_drift*100:+.2f}% (max ±{max_entry_dev*100:.2f}%) fill={fill:.6g} req={requested_entry:.6g}"}
 
         # Limit already invalidated before gateway open: no synthetic perfect fill.
         if side == "LONG" and sl_price and mark <= sl_price:
@@ -1156,6 +1161,12 @@ class PaperMainnetTrader:
             "qty_closed": 0.0,
             "qty_remaining": qty_opened,
             "symbol": symbol, "side": side, "entry_price": fill,
+            "planned_entry_price": float(requested_entry if requested_entry > 0 else fill),
+            "actual_fill_price": float(fill),
+            "fill_price": float(fill),
+            "market_price_at_open": float(mark),
+            "entry_fill_source": "ACTUAL_FILL",
+            "entry_integrity_status": "MATCHED",
             "sl_price": sl_price, "provider_sl_original": sl_price,
             "planned_risk_usd": planned_risk,
             "planned_notional": notional,
@@ -1958,7 +1969,15 @@ class PaperMainnetTrader:
                 "symbol": symbol, "side": side,
                 "entry_price": entry, "exit_price": actual_exit,
                 "notional_usd": float(pos.get("notional", notional)), "pnl_pct": pnl_pct,
-                "pnl_usd": realized_net_pnl, "final_exit_net_pnl_usd": pnl_usd,
+                "pnl_usd": realized_net_pnl,
+                "net_pnl": realized_net_pnl,
+                "final_exit_net_pnl_usd": realized_net_pnl,
+                "planned_entry_price": float(pos.get("planned_entry_price", pos.get("signal_entry_price", entry))),
+                "actual_fill_price": float(pos.get("actual_fill_price", entry)),
+                "fill_price": float(pos.get("actual_fill_price", entry)),
+                "entry_fill_source": str(pos.get("entry_fill_source", "ACTUAL_FILL")),
+                "entry_integrity_status": str(pos.get("entry_integrity_status", "MATCHED")),
+                "market_price_at_open": float(pos.get("market_price_at_open", entry)),
                 "gross_pnl_usd": gross_pnl, "entry_fee_usd": pos.get("entry_fee", 0.0),
                 "exit_fee_usd": exit_fee,
                 "hold_minutes": hold_min, "reason": reason, "raw_reason": reason,

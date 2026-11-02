@@ -616,7 +616,7 @@ def _derive_execution_integrity_fields(trade: Dict[str, Any], phase1_profile: Di
     elif drift_pct >= 0.03:
         integrity_status = "FILL_MISMATCH"
     elif not _is_missing(actual_fill_raw):
-        integrity_status = "OK"
+        integrity_status = "MATCHED"
     else:
         integrity_status = "UNKNOWN"
 
