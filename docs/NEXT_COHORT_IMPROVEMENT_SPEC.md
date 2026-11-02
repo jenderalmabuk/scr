@@ -1,26 +1,79 @@
-# Cetak Biru & Spesifikasi Perbaikan Sistem: Cohort Berikutnya
+# Cetak Biru & Spesifikasi Perbaikan Sistem: Cohort 002
 
-**Status Dokumen**: Terkunci untuk Implementasi Pasca-Cohort 001  
-**Target Rilis**: `cohort_post_patch_202611xx_002`  
-**Konteks Observasi**: Analisis kegagalan Trade ONDOUSDT (31 Okt 2026) & Bottleneck Signal Copy Floor  
+**Status Dokumen**: ✅ **IMPLEMENTED & DEPLOYED (Cohort 002 Live)**  
+**Commit Git**: `38b270c` (Pushed to `origin/main`)  
+**Target Rilis**: `cohort_post_patch_20261102_002`  
+**Hasil Audit Eksternal**: Menjawab 100% temuan P0/P1/P2 AI ane (11/2/2026 9:58 AM)  
+**Status Verifikasi Test**: 7/7 Acceptance Tests Passed, 20/20 Core Unit Tests Passed  
 
 ---
 
-## 1. Latar Belakang & Kasus Kegagalan (Case Study)
+## 1. Latar Belakang & Temuan Forensik Audit (P0/P1/P2)
 
-Selama observasi berjalan pada `cohort_post_patch_20261030_001`, sistem mencatatkan efektivitas perlindungan risiko yang solid (Net-Risk Cap $2 dipatuhi secara penny-exact, total 6/6 fill rate, posisi AAVE profit +$2.34, UNI profit +$0.99). Namun, teridentifikasi 2 kelemahan spesifik:
+Berdasarkan audit mendalam atas trade ONDOUSDT dan AAVEUSDT, ditemukan safety breach dan provenance gap struktural:
 
-1. **Kasus ONDOUSDT (Dua Loss Beruntun -$4.00 Total):**
-   - Trade #1 (06:53 UTC): Entry LONG di 0.4188 -> Kena SL di 0.4066 (-$1.99).
-   - Trade #2 (17:06 UTC): Entry LONG di 0.4131 -> Kena SL di 0.4091 (-$2.01).
-   - **Akar Masalah:**
-     - *Lagging 1h EMA:* Tren makro EMA 20/50 masih hijau padahal harga sudah membuat Lower Low (-4.5% dari puncak).
-     - *Flickering Orderflow:* Flow sempat diblokir 4 bar berturut-turut oleh `NO_TRADE`, namun jebol saat volume buyer spike sesaat selama 1 bar.
-     - *Ketiadaan Cooldown Pair:* Pasca-SL pada pukul 11:07 UTC, tidak ada jeda larangan arah yang sama, sehingga 6 jam kemudian bot kembali masuk LONG di koin yang sama.
+1. **P0 — Entry Deviation Guard Asimetris (Lolos Upward Chase):**
+   - *Bukti:* ONDO LONG planned `0.4166`, fill `0.4188093` (+0.5305% vs limit 0.25%). AAVE LONG planned `134.5`, fill `134.0` (-0.3717% vs limit 0.25%).
+   - *Akar Masalah:* Kode lama hanya mengecek `drift < -max_entry_dev` untuk LONG. Jika harga melonjak naik (chase), batas toleransi longgar hingga 2.5x (0.625%), lalu `_adverse_fill()` menambah penalti slippage tanpa ada post-fill check.
+2. **P0 — `PLANNED_FALLBACK` & `entry_integrity_status: UNKNOWN`:**
+   - *Bukti:* Seluruh 11 trade di `trade_history.json` dilabeli fallback karena mismatch nama key (`entry_price` vs `actual_fill_price` yang dicari journal).
+3. **P1 — PnL Dual Definition Ambiguity:**
+   - *Bukti:* `pnl_usd` (net cashflow potong entry+exit fee) berbeda dengan `final_exit_net_pnl_usd` (hanya potong exit fee) sebesar entry fee ($0.0331).
+4. **P1 — Confluence Provenance Gap:**
+   - *Bukti:* Notifikasi Telegram menampilkan indikator centang hijau, tetapi payload ke Gateway tidak menyertakan indikator `ema20`, `ema50`, `cvd`, `oi_15m`, dan `score` (terekam null/0.0 di jurnal).
+5. **P1 — `BOTH_ALLOWED` & `NEUTRAL` Terlalu Permisif:**
+   - *Bukti:* Scanner membuka posisi saat orderflow netral tanpa konfirmasi arah dominan.
 
-2. **Kasus Signal Copy Telegram (Zero Executions):**
-   - 38 sinyal Telegram memiliki score VALID (≥ 75.0) dengan win rate historis 65.8% (rasio TP1:SL = 21:3).
-   - Seluruh sinyal ini diveto karena `COMMITTEE_SOFT_FLOOR=90.0`, padahal score maksimal di runtime hanya mencapai 82.8.
+---
+
+## 2. Arsitektur Patch Terpasang (Cohort 002 Deployed)
+
+```mermaid
+flowchart TD
+    Scanner["Autonomous Scanner"] -->|1. Setup + Full Immutable Confluence Snapshot| GatewayCheck["Gateway Pre-Check"]
+    GatewayCheck -->|Orderflow != LONG_ONLY/SHORT_ONLY| Reject1["REJECT: DIRECTIONAL_GATE_VETO"]
+    GatewayCheck -->|Pass| PaperTrader["Paper Mainnet Trader"]
+    
+    subgraph Execution_Guard ["Strict Symmetrical Execution Guard (0.25% Limit)"]
+        PaperTrader --> CheckMark["1. Pre-Fill Guard: abs(mark - requested) / requested <= 0.25%"]
+        CheckMark -->|Dev > 0.25%| Reject2["REJECT: ENTRY_CHASE_EXCEEDED"]
+        CheckMark -->|Pass| CalcFill["2. Calculate Adverse Fill (Simulated Slippage)"]
+        CalcFill --> CheckPostFill["3. Post-Fill Guard: abs(fill - requested) / requested <= 0.25%"]
+        CheckPostFill -->|Dev > 0.25%| Reject3["REJECT: ENTRY_CHASE_EXCEEDED"]
+        CheckPostFill -->|Pass| CreatePos["4. CREATE POSITION"]
+    end
+    
+    CreatePos --> Journal["Authoritative Ledger (trade_journal.py)"]
+    Journal --> LedgerData["• net_pnl = gross - fees - funding (Authoritative)\n• actual_fill_price mapped\n• entry_fill_source = ACTUAL_FILL\n• entry_integrity_status = MATCHED\n• full adv_snapshot persisted\n• granular breach counters active"]
+```
+
+---
+
+## 3. Komponen yang Telah Diperbaiki
+
+1. **`execution/paper_mainnet_trader.py`:**
+   - Penerapan **Symmetric 2-Sided Entry Deviation Guard**: Memeriksa `abs(mark - requested_entry) / requested_entry > 0.0025` baik ke atas maupun ke bawah.
+   - Penerapan **Post-Fill Adverse Slippage Check**: Memastikan harga fill riil tidak melewati batas 0.25% setelah ditambah simulasi slippage.
+   - Penambahan key provenansi pada posisi: `planned_entry_price`, `actual_fill_price`, `market_price_at_open`, `entry_fill_source="ACTUAL_FILL"`, `entry_integrity_status="MATCHED"`.
+   - Penyatuan field PnL: `net_pnl == realized_net_pnl == final_exit_net_pnl_usd`.
+2. **`execution/trade_journal.py`:**
+   - `entry_integrity_status` diset otomatis menjadi `"MATCHED"` jika deviasi valid dan fill price ada.
+   - Mencegah fallback diam-diam di mode real-price matching.
+3. **`bots/autonomous_market_scanner.py`:**
+   - **Strict Directional Flow Gate**: `BOTH_ALLOWED`, `NEUTRAL`, `UNKNOWN`, atau `null` langsung ditolak (`None`). LONG hanya boleh jika `LONG_ONLY` / `STRONG_BUY`. SHORT hanya boleh jika `SHORT_ONLY` / `STRONG_SELL`.
+   - **Full Immutable Confluence Snapshot**: Menyimpan `ema20_1h`, `ema50_1h`, `ema20_15m`, `ema50_15m`, `atr_15m`, `rsi_15m`, `cvd_delta`, `taker_buy_ratio`, `oi_15m_pct`, `btc_regime`, dan `score` di `adv_snapshot` dan root payload.
+4. **`gateway/order_intent.py` & `gateway/api.py` & `gateway/service.py`:**
+   - Menambahkan field `score` pada skema `OrderIntent` dan `OrderIntentBody`.
+   - Menambahkan counter audit khusus: `entry_deviation_rejected`, `fallback_fill_breached`, `directional_gate_rejected`.
+5. **Test Suite Baru (`tests/test_cohort_002_acceptance.py`):**
+   - 7 test suite lulus 100%:
+     - `test_ondo_scenario_long_upward_chase_rejected`: PASSED
+     - `test_aave_scenario_long_adverse_drop_rejected`: PASSED
+     - `test_entry_deviation_within_tolerance_accepted`: PASSED
+     - `test_post_fill_slippage_deviation_rejected`: PASSED
+     - `test_pnl_parity_authoritative_ledger`: PASSED
+     - `test_order_intent_score_propagation`: PASSED
+     - `test_directional_orderflow_gate_logic`: PASSED
 
 ---
 
