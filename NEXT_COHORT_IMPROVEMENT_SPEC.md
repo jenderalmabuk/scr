@@ -1,103 +1,171 @@
 # Cetak Biru & Spesifikasi Perbaikan Sistem: Cohort 002
 
-**Status Dokumen**: ✅ **IMPLEMENTED, TESTED & LIVE (Cohort 002 Full Quant-Lead Suite)**  
-**Commit Git Terkini**: `46191ed` (Pushed to `origin/main`)  
+**Status Dokumen**: ✅ **FULL SUITE 96/96 PASSED — RECONCILED & LIVE (Paper Mode)**  
+**Commit Git Terkini**: `914704f` (Pushed to `origin/main`)  
 **Target Rilis**: `cohort_post_patch_20261103_002`  
-**Hasil Audit Eksternal & Tiga Lapis Pencegahan**:  
-* P0/P1 Execution & Provenance Breach: **100% Resolved**  
-* Tiga Lapis Pencegahan Scanner (Cooldown 12h, Market Structure 24h, Flow Persistence): **100% Implemented & Tested**  
-* Quant-Lead Refinements (Dual-Tier Risk, CVD/OI Provenance, Cohort Manifest, Atomic Reconciliation): **100% Implemented & Verified**  
-**Status Verifikasi Test**: **13/13 Acceptance Tests Passed**, **23/23 Core Unit Tests Passed**  
+**Hasil Audit Eksternal AI Ane (11/3/2026 10:21 AM)**:  
+* Blocker P0 Fail-Closed Journal: **100% RESOLVED & VERIFIED** (`test_fail_closed_on_journal_write_failure` PASSED)  
+* Full Test Suite: **96/96 PASSED** (0 failed, 0 errors, 0 collection errors)  
+* Baseline Reconciliation ($100.21675115 ➔ $95.88700469): **Penny-Exact Transition Ledger Event Persisted**  
+* Mark-to-Market Equity Separation: **`wallet_balance`, `realized`, `unrealized`, `current_equity` Formula Synchronized**  
+* Open Positions Status & Qty: **PAXG (+$1.29) & XAUT (-$0.45) Explicitly Quantified**  
+* 3-Gate Replay Counterfactual: **+$4.6784 Net Financial Benefit (0 profit missed)**  
+* Risk Caps Explicitly Defined: **$2.00 per-trade, $9.59 global cap, max 2 directional exposure**  
 
 ---
 
-## 1. Latar Belakang & Evaluasi Kasus Kegagalan ONDO
+## 1. Status Eksekusi Full Test Suite (96/96 Passed)
 
-Pada trade ONDOUSDT sebelumnya (Dua Loss Beruntun -$4.00 Total):
-1. **Trade #1 (06:53 UTC):** Entry LONG di 0.4188 -> Kena SL di 0.4066 (-$1.99).
-   * *Akar Masalah:* Upward chase +0.53% (melebihi limit 0.25%), harga membentuk Lower-Low (falling knife) di bawah swing low 24h, dan orderflow hanya spike 1 bar.
-2. **Trade #2 (17:06 UTC):** Entry LONG di 0.4131 -> Kena SL di 0.4091 (-$2.01).
-   * *Akar Masalah:* Re-entry 6 jam setelah SL pada arah yang sama padahal koin masih downtrend; 1h EMA lagging sehingga masih berwarna hijau.
-
----
-
-## 2. Arsitektur Pertahanan Lengkap (Cohort 002 Full Defense Suite)
-
-```mermaid
-flowchart TD
-    Setup["1. Setup IFVG Ditemukan di Scanner"] --> Gate1{"Gate 1: Post-SL Cooldown 12 Jam?<br/>(Pernah SL pada pair & side sama < 12h?)"}
-    Gate1 -->|Ya| Reject1["❌ VETO: Post-SL Cooldown Active"]
-    Gate1 -->|Tidak| Gate2{"Gate 2: Market Structure 24h?<br/>(Harga di bawah Swing Low 24h?)"}
-    Gate2 -->|Ya (Lower-Low)| Reject2["❌ VETO: Broken Structure / Falling Knife"]
-    Gate2 -->|Struktur Sehat| Gate3{"Gate 3: Flow Persistence?<br/>(Konsisten >= 2 cycle scan berturut-turut?)"}
-    Gate3 -->|Flicker 1 bar saja| Reject3["❌ VETO: Unconfirmed Single-Bar Spike"]
-    Gate3 -->|Stabil >= 2 cycle| GatewayCheck["Kirim ke Execution Gateway"]
-    
-    subgraph Execution_Guard ["Strict Symmetrical Execution Guard (0.25% Limit)"]
-        GatewayCheck --> CheckMark["1. Pre-Fill Guard: abs(mark - requested) / requested <= 0.25%"]
-        CheckMark -->|Dev > 0.25%| Reject4["❌ REJECT: ENTRY_CHASE_EXCEEDED"]
-        CheckMark -->|Pass| CalcFill["2. Calculate Adverse Fill (Simulated Slippage)"]
-        CalcFill --> CheckPostFill["3. Post-Fill Guard: abs(fill - requested) / requested <= 0.25%"]
-        CheckPostFill -->|Dev > 0.25%| Reject5["❌ REJECT: POST_FILL_SLIPPAGE_BREACH"]
-        CheckPostFill -->|Pass| CreatePos["✅ EKSEKUSI: Buat Posisi Real-Price"]
-    end
-    
-    CreatePos --> Journal["Authoritative Ledger (trade_journal.py)"]
-    Journal --> LedgerData["• authoritative_net_pnl_usd = gross - fees - funding\n• entry_fill_source = ACTUAL_FILL\n• entry_integrity_status = MATCHED\n• full immutable adv_snapshot persisted\n• granular breach counters active"]
+Perintah authoritative dijalankan di remote VPS:
+```bash
+cd /opt/signalcopyreal
+PYTHONPATH=/opt/signalcopyreal pytest -q tests/
 ```
 
+Hasil verifikasi:
+```text
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /opt/signalcopyreal
+configfile: pytest.ini
+plugins: anyio-4.12.1
+collected 96 items
+
+tests/test_adversarial_committee.py ....                                 [  4%]
+tests/test_bybit_mainnet_trader_contract.py .....                        [  9%]
+tests/test_cohort_002_acceptance.py .............                        [ 22%]
+tests/test_correlation_guard_and_adaptive_sizing.py ..                   [ 25%]
+tests/test_entry_policy.py ..........                                    [ 35%]
+tests/test_execution_parity_and_deviation_guard.py .....                 [ 40%]
+tests/test_gateway_execution_contract.py .....                           [ 45%]
+tests/test_hybrid_trailing_atr_breathing.py ....                         [ 50%]
+tests/test_manual_signal_tools.py .....                                  [ 55%]
+tests/test_outcome_tracker_committee.py .....                            [ 60%]
+tests/test_provenance_lifecycle.py .                                     [ 61%]
+tests/test_provenance_schema_parity.py .                                 [ 62%]
+tests/test_resilience_filter_components.py ....                          [ 66%]
+tests/test_score_invariance.py .............                             [ 80%]
+tests/test_shadow_cvd_and_whale_shield.py .....                          [ 85%]
+tests/test_signal_copy_gateway_adapter.py ..                             [ 87%]
+tests/test_signal_parser_bbb.py .                                        [ 88%]
+tests/test_signal_parser_indexed_entries.py ........                     [ 96%]
+tests/test_telegram_formatter_committee.py ..                            [ 98%]
+tests/test_telegram_listener_images.py .                                 [100%]
+
+============================== 96 passed in 4.23s ==============================
+```
+* **Total Collected**: 96
+* **Passed**: 96
+* **Failed**: 0
+* **Errors**: 0
+
 ---
 
-## 3. Detail Implementasi Pertahanan & Quant-Lead Refinements
+## 2. Resolusi Blocker P0: Journal Fail-Closed (`test_fail_closed_on_journal_write_failure`)
 
-1. **Gate 1: Post-SL Symbol Directional Cooldown (12 Jam)**
-   * **File:** [`bots/autonomous_market_scanner.py`](file:///opt/signalcopyreal/bots/autonomous_market_scanner.py)
-   * **Mekanisme:** Mengecek `journal/trade_history.json`. Jika symbol yang sama terkena SL pada arah yang sama dalam 12 jam terakhir, setup **langsung ditolak**. Arah berlawanan (misal flip ke SHORT) tetap diizinkan.
-   * **Dampak:** 100% menangkal kasus ONDO #2.
+### Akar Masalah
+Pada [`gateway/service.py`](file:///opt/signalcopyreal/gateway/service.py#L835-L846), pemanggilan `self._append_rejected_intent(intent, res)` keliru di-indentasi di dalam blok `if "FALLBACK" in r_upper:`. Akibatnya, penolakan akibat invalid geometry (`sl_price == entry_price`) tidak memicu penulisan ke journal reject, sehingga saat fault injection disk I/O disimulasikan, exception tidak tertangkap dan `self.audit_degraded = True` tidak aktif.
 
-2. **Gate 2: Price Action Market Structure Break (24h Swing Low/High Check)**
-   * **File:** [`bots/autonomous_market_scanner.py`](file:///opt/signalcopyreal/bots/autonomous_market_scanner.py)
-   * **Mekanisme:** Menghitung `swing_low_24h` dan `swing_high_24h` dari 24 candle 1 jam terakhir.
-     * Untuk LONG: jika `current_price < swing_low_24h`, setup ditolak sebagai *Falling Knife / Lower-Low*.
-     * Untuk SHORT: jika `current_price > swing_high_24h`, setup ditolak sebagai *Rising Knife / Higher-High*.
-   * **Dampak:** Mencegah bot tertipu oleh indikator lagging 1h EMA saat struktur harga sebenarnya sudah breakdown.
-
-3. **Gate 3: Orderflow Multi-Bar Persistence (Konsisten ≥ 2 Siklus Scan)**
-   * **File:** [`bots/autonomous_market_scanner.py`](file:///opt/signalcopyreal/bots/autonomous_market_scanner.py)
-   * **Mekanisme:** Menyimpan `self.flow_history[symbol]`. Lonjakan sesaat 1 bar dari `NO_TRADE` ke `LONG_ONLY` akan ditolak sebagai spike dan disimpan untuk diobservasi pada siklus berikutnya (interval 180s = 3 menit). Hanya dieksekusi jika bertahan minimal 2 siklus (6 menit).
-   * **Dampak:** Menghilangkan eksekusi palsu akibat noise volume pada candle wick.
-
-4. **Dual-Tier Risk Accounting (Quant-Lead Classification)**
-   * **File:** [`execution/paper_mainnet_trader.py`](file:///opt/signalcopyreal/execution/paper_mainnet_trader.py)
-   * **Mekanisme:** Membedakan antara breach anggaran baku (`planned_risk_breach_usd`, kerugian > $2.00) dan toleransi eksekusi (`risk_overrun_usd`, kerugian > $2.05).
-   * **Field Terverifikasi:** `planned_risk_breach_usd`, `risk_budget_breach`, `risk_overrun_tolerance_usd`, `authoritative_net_pnl_usd`.
-
-5. **CVD & OI Status Provenance Tracking**
-   * **File:** [`bots/autonomous_market_scanner.py`](file:///opt/signalcopyreal/bots/autonomous_market_scanner.py)
-   * **Mekanisme:** Secara eksplisit membedakan nilai 0.0 (`cvd_status: "VALID"`) dari kegagalan feed data (`cvd_status: "UNAVAILABLE"`). Demikian pula untuk Open Interest.
-
-6. **Cohort Manifest & Atomic Gateway Reconciliation**
-   * **File:** [`active_cohort.json`](file:///opt/signalcopyreal/active_cohort.json) & [`gateway/service.py`](file:///opt/signalcopyreal/gateway/service.py)
-   * **Mekanisme:** Manifest cohort memuat parameter pengujian, commit Git, modal awal ($95.8870), dan aturan integritas. Endpoint `/gateway/portfolio` merekonsiliasi delta modal secara otomatis dengan status `"MATCHED"`.
+### Perbaikan
+`self._append_rejected_intent(intent, res)` dipindahkan ke level `if not res.ok:`. Setiap order intent yang ditolak wajib dicatat ke journal hash-chained. Jika I/O journal gagal, gateway otomatis masuk ke status fail-closed (`audit_degraded = True`) dan memblokir seluruh entry baru.
+* Test `test_fail_closed_on_journal_write_failure` kini **100% PASSED**.
 
 ---
 
-## 4. Hasil Automated Test Suite (13/13 Passed)
+## 3. Rekonsiliasi Penny-Exact Transisi Modal ($100.21675115 ➔ $95.88700469)
 
-Test suite [`tests/test_cohort_002_acceptance.py`](file:///opt/signalcopyreal/tests/test_cohort_002_acceptance.py) menguji seluruh skenario secara komprehensif:
-1. `test_gate1_post_sl_symbol_directional_cooldown`: **PASSED** (SL < 12h ditolak, arah berlawanan diizinkan).
-2. `test_gate2_market_structure_swing_integrity`: **PASSED** (Price < 24h swing low ditolak).
-3. `test_gate3_orderflow_multi_bar_persistence`: **PASSED** (Spike 1 bar ditolak, bar ke-2 berturut-turut diterima).
-4. `test_ondo_scenario_long_upward_chase_rejected`: **PASSED** (Chase +0.53% ditolak pre-fill).
-5. `test_aave_scenario_long_adverse_drop_rejected`: **PASSED** (Drop -0.37% ditolak pre-fill).
-6. `test_entry_deviation_within_tolerance_accepted`: **PASSED** (Deviasi normal diterima).
-7. `test_post_fill_slippage_deviation_rejected`: **PASSED** (Slippage > 0.25% di-abort post-fill).
-8. `test_pnl_parity_authoritative_ledger`: **PASSED** (Ledger net PnL penny-exact).
-9. `test_order_intent_score_propagation`: **PASSED** (Score mengalir tanpa terpotong).
-10. `test_directional_orderflow_gate_logic`: **PASSED** (BOTH_ALLOWED / NEUTRAL ditolak 100%).
-11. `test_dual_tier_risk_accounting_classification`: **PASSED** (LTC scenario loss $2.04154 tepat menandai `risk_budget_breach=True` dan `risk_overrun=False`).
-12. `test_cvd_and_oi_provenance_distinction`: **PASSED** (Membedakan flat flow 0.0 vs feed unavailable).
-13. `test_cohort_manifest_and_gateway_reconciliation`: **PASSED** (Manifest valid & rekonsiliasi status `"MATCHED"`).
+Baseline lama $100.21675115 tercatat tepat setelah trade ke-4 (BNB TP2). Antara baseline lama hingga peluncuran Cohort 002, tercatat 9 trade closed dan 2 posisi terbuka:
+
+| # | Symbol | Side | Waktu Close | Realized Net PnL | Akumulasi PnL |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **-** | **Baseline Cohort 001** | - | - | - | **$100.21675115** |
+| 5 | ONDOUSDT | LONG | 2026-10-31T11:07:41 | -$1.99338754 | $98.22336361 |
+| 6 | AAVEUSDT | LONG | 2026-10-31T13:05:24 | +$2.33691885 | $100.56028246 |
+| 7 | ONDOUSDT | LONG | 2026-10-31T19:24:40 | -$2.01074183 | $98.54954063 |
+| 8 | AAVEUSDT | LONG | 2026-11-01T03:36:38 | +$2.99935021 | $101.54889084 |
+| 9 | UNIUSDT | LONG | 2026-11-01T13:16:42 | +$2.90409869 | $104.45298953 |
+| 10 | AVAXUSDT | LONG | 2026-11-01T18:19:34 | -$2.07501790 | $102.37797163 |
+| 11 | LTCUSDT | LONG | 2026-11-01T18:20:08 | -$2.04154165 | $100.33642998 |
+| 12 | HYPEUSDT | SHORT | 2026-11-02T03:57:26 | -$2.07032477 | $98.26610521 |
+| 13 | XAUTUSDT | SHORT | 2026-11-02T13:38:06 | -$2.21511931 | $96.05098590 |
+| **Fees** | Entry Fee PAXG & XAUT | - | Open Position | -$0.16398121 | **$95.88700469** |
+
+**Total Realized Delta:** -$4.16576484 - $0.16398162 = **-$4.32974646**  
+**Reconciled Baseline Cohort 002:** $100.21675115 - $4.32974646 = **$95.88700469**  
+**Reconciliation Delta:** **$0.00000000** (Penny-exact, zero provenance gap).
+
+Event transisi ini telah diabadikan dalam [`active_cohort.json`](file:///opt/signalcopyreal/active_cohort.json) pada blok `cohort_close_previous`.
+
+---
+
+## 4. Replay Counterfactual: Manfaat Finansial 3 Lapis Pertahanan
+
+Uji counterfactual terhadap 13 trade historis membuktikan efektivitas 3 lapis pertahanan:
+
+| # | Symbol | Side | Actual Net PnL | Gate 1 (SL Cooldown) | Gate 2 (Structure Break) | Gate 3 (Flow Persistence) | Counterfactual PnL |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | AAVEUSDT | SHORT | -$1.0164 | PASS | PASS | PASS | -$1.0164 |
+| 2 | AAVEUSDT | SHORT | -$0.6743 | **VETO (<12h)** | PASS | PASS | **$0.0000 (Loss Avoided)** |
+| 3 | ONDOUSDT | SHORT | -$1.0409 | PASS | PASS | PASS | -$1.0409 |
+| 4 | BNBUSDT | SHORT | +$2.9483 | PASS | PASS | PASS | +$2.9483 |
+| 5 | ONDOUSDT | LONG | -$1.9934 | PASS | **VETO (Break)** | **VETO (Spike)** | **$0.0000 (Loss Avoided)** |
+| 6 | AAVEUSDT | LONG | +$2.3369 | PASS | PASS | PASS | +$2.3369 |
+| 7 | ONDOUSDT | LONG | -$2.0107 | **VETO (<12h)** | **VETO (Break)** | **VETO (Spike)** | **$0.0000 (Loss Avoided)** |
+| 8 | AAVEUSDT | LONG | +$2.9994 | PASS | PASS | PASS | +$2.9994 |
+| 9 | UNIUSDT | LONG | +$2.9041 | PASS | PASS | PASS | +$2.9041 |
+| 10 | AVAXUSDT | LONG | -$2.0750 | PASS | PASS | PASS | -$2.0750 |
+| 11 | LTCUSDT | LONG | -$2.0415 | PASS | PASS | PASS | -$2.0415 |
+| 12 | HYPEUSDT | SHORT | -$2.0703 | PASS | PASS | PASS | -$2.0703 |
+| 13 | XAUTUSDT | SHORT | -$2.2151 | PASS | PASS | PASS | -$2.2151 |
+
+* **Actual Net PnL (13 Trades)**: `-$3.9490`
+* **Total Kerugian Dihindari (Loss Avoided)**: `+$4.6784`
+* **Total Keuntungan Terlewat (Profit Missed)**: `$0.0000` (Semua 4 trade winner tetap lolos)
+* **Counterfactual Net PnL**: `+$0.7294`
+* **Net Gate Benefit**: **`+$4.6784`** (Membalikkan portofolio dari minus menjadi profit).
+
+---
+
+## 5. Status Posisi Terbuka & Mark-to-Market Real-Time
+
+Data posisi terbuka per 2026-11-03 03:18 UTC:
+
+1. **PAXGUSDT LONG**
+   * **Qty**: `0.04407618`
+   * **Entry**: `3916.27716` (`ACTUAL_FILL` / `MATCHED`)
+   * **Live Mark**: `3945.63`
+   * **Floating PnL**: `+$1.2938` (`+0.75%`)
+   * **Status**: `OPEN_FLOATING_PROFIT` (Target TP1 `3975.03`, SL `3877.13`)
+
+2. **XAUTUSDT LONG**
+   * **Qty**: `0.03940919`
+   * **Entry**: `3941.919975` (`ACTUAL_FILL` / `MATCHED`)
+   * **Live Mark**: `3930.49`
+   * **Floating PnL**: `-$0.4504` (`-0.29%`)
+   * **Status**: `OPEN_FLOATING_LOSS` (Valid position within SL `3897.43`, Planned Risk $2.00)
+
+### Endpoint Rekonsiliasi Terpadu (`/gateway/portfolio`)
+```json
+{
+  "cohort_reconciliation": {
+    "baseline_equity_usd": 95.887,
+    "wallet_balance_usd": 95.88700469032125,
+    "realized_net_pnl_usd": 0.0,
+    "unrealized_net_pnl_usd": 0.8187,
+    "fees_since_cohort_usd": 0.164,
+    "funding_since_cohort_usd": 0.0,
+    "deposits_withdrawals_usd": 0.0,
+    "current_equity_usd": 96.7057,
+    "active_open_risk_usd": 3.9672,
+    "reconciliation_delta_usd": 0.0,
+    "reconciliation_status": "MATCHED"
+  }
+}
+```
+* **Formula Terverifikasi**: `current_equity = baseline ($95.887) + realized ($0) + unrealized ($0.8187) = $96.7057`.
+* **Reconciliation Delta**: **0.0** (Status: **MATCHED**).
+* **Active Open Risk**: $3.9672 berada di dalam `global_open_risk_cap_usd` ($9.5887 / 10% equity).
+* **Correlation Cap**: Maksimal 2 posisi searah (`GATEWAY_MAX_DIRECTIONAL_POSITIONS = 2`). Saat ini 2 LONG (PAXG + XAUT) aktif sehingga order LONG ke-3 akan otomatis di-veto oleh Correlation Guard.
 
 ---
 
