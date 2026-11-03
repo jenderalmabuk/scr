@@ -578,14 +578,20 @@ class ExecutionGateway:
             out["open_positions"] = []
         # Atomic Cohort Reconciliation
         cohort_info = {}
-        cohort_path = Path("/opt/signalcopyreal/active_cohort.json")
-        if cohort_path.exists():
-            try:
-                import json
-                with cohort_path.open("r", encoding="utf-8") as f:
-                    cohort_info = json.load(f)
-            except Exception:
-                pass
+        for c_path in [
+            Path("/app/journal/active_cohort.json"),
+            Path("/opt/signalcopyreal/journal/active_cohort.json"),
+            Path("/opt/signalcopyreal/active_cohort.json"),
+        ]:
+            if c_path.exists():
+                try:
+                    import json
+                    with c_path.open("r", encoding="utf-8") as f:
+                        cohort_info = json.load(f)
+                    if cohort_info:
+                        break
+                except Exception:
+                    pass
         out["active_cohort"] = cohort_info
         
         current_eq = float(out.get("equity") or 0.0)
