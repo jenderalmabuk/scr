@@ -385,8 +385,8 @@ class TestCohort002Acceptance(unittest.TestCase):
         reconcil = port["cohort_reconciliation"]
         self.assertEqual(reconcil["reconciliation_status"], "MATCHED")
         self.assertAlmostEqual(reconcil["baseline_equity_usd"], 95.8870, places=4)
-        self.assertAlmostEqual(reconcil["current_equity_usd"], 97.5000, places=4)
-        self.assertAlmostEqual(reconcil["equity_delta_usd"], 1.6130, places=4)
+        self.assertAlmostEqual(reconcil["wallet_balance_usd"], 97.5000, places=4)
+        self.assertEqual(reconcil["reconciliation_delta_usd"], 0.0)
 
 
 if __name__ == "__main__":
