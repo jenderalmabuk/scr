@@ -188,6 +188,7 @@ class AutonomousMarketScanner:
     def __init__(self):
         self.last_scanned: Dict[str, float] = {}
         self.crypto_whitelist: set[str] = load_crypto_whitelist()
+        self.flow_history: Dict[str, str] = {}
         logger.info("[INIT] Loaded %d verified pure-crypto symbols into whitelist (Filter 2)", len(self.crypto_whitelist))
 
     async def get_universe(self) -> List[str]:
@@ -286,6 +287,30 @@ class AutonomousMarketScanner:
             if res and res.get("data"):
                 return res["data"]
         return []
+
+    def check_post_sl_symbol_cooldown(self, symbol: str, side: str, cooldown_hours: float = 12.0) -> Tuple[bool, str]:
+        """Reject entry if the same symbol recently stopped out in the same direction within cooldown_hours."""
+        history_file = Path("/opt/signalcopyreal/journal/trade_history.json")
+        if not history_file.exists():
+            return False, "ok"
+        now = time.time()
+        try:
+            with history_file.open("r", encoding="utf-8") as f:
+                trades = json.load(f)
+            for t in reversed(trades[-50:]):
+                if t.get("symbol") == symbol and t.get("side") == side:
+                    reason = str(t.get("normalized_reason") or t.get("exit_reason") or t.get("reason") or "").upper()
+                    if "SL" in reason or "STOP_LOSS" in reason:
+                        tc = t.get("timestamp_close") or t.get("exit_time")
+                        if tc:
+                            dt = datetime.fromisoformat(tc.replace("Z", "+00:00"))
+                            elapsed_sec = now - dt.timestamp()
+                            if elapsed_sec < (cooldown_hours * 3600):
+                                rem_hours = (cooldown_hours * 3600 - elapsed_sec) / 3600.0
+                                return True, f"Recently stopped out on {side} ({rem_hours:.1f}h cooldown remaining)"
+        except Exception as err:
+            logger.warning("[COOLDOWN] Check failed for %s: %s", symbol, err)
+        return False, "ok"
 
     async def analyze_pair(self, symbol: str, btc_regime: str) -> Optional[Dict[str, Any]]:
         """
@@ -388,6 +413,29 @@ class AutonomousMarketScanner:
         if not side:
             return None
 
+        # ── Gate 1: Post-SL Symbol Directional Cooldown (12 Hours) ────────
+        is_sl_cd, cd_msg = self.check_post_sl_symbol_cooldown(symbol, side, cooldown_hours=12.0)
+        if is_sl_cd:
+            logger.info("[COOLDOWN VETO] %s %s blocked: %s", symbol, side, cd_msg)
+            return None
+
+        # ── Gate 2: Market Structure Swing Integrity (24 Hours) ───────────
+        # Reject LONG if price is below 24h swing low (Lower-Low / Falling Knife)
+        # Reject SHORT if price is above 24h swing high (Higher-High / Rising Knife)
+        if len(k1h) >= 25:
+            lows_24h = [float(k["low"]) for k in k1h[-25:-1]]
+            highs_24h = [float(k["high"]) for k in k1h[-25:-1]]
+            swing_low_24h = min(lows_24h)
+            swing_high_24h = max(highs_24h)
+            if side == "LONG" and current_price < swing_low_24h:
+                logger.info("[STRUCTURE VETO] %s LONG rejected: price %.6g broke below 24h swing low %.6g (Lower-Low / Falling Knife)",
+                            symbol, current_price, swing_low_24h)
+                return None
+            elif side == "SHORT" and current_price > swing_high_24h:
+                logger.info("[STRUCTURE VETO] %s SHORT rejected: price %.6g broke above 24h swing high %.6g (Higher-High / Rising Knife)",
+                            symbol, current_price, swing_high_24h)
+                return None
+
         # ── 5. Smart Stop Loss & Filter 3 (Anti-Wick Noise Floor >= 1.0%) ─
         entry = current_price
         if side == "LONG":
@@ -430,18 +478,28 @@ class AutonomousMarketScanner:
             logger.info("[ADVERSARIAL VETO] %s SHORT rejected by flow_dir=LONG_ONLY", symbol)
             return None
 
-        # Strict Directional Flow Gate:
-        # BOTH_ALLOWED, NEUTRAL, UNKNOWN, or null is STRICTLY REJECTED for new entries.
-        # Long requires confirmed LONG_ONLY or STRONG_BUY.
-        # Short requires confirmed SHORT_ONLY or STRONG_SELL.
+        # ── Gate 3: Orderflow Directional & Multi-Bar Persistence ─────────
+        # 1. Reject BOTH_ALLOWED, NEUTRAL, UNKNOWN, or null
+        # 2. Require at least 2 consecutive scan cycles of confirmed directional flow (anti-flicker)
+        prev_flow = self.flow_history.get(symbol)
+        self.flow_history[symbol] = flow_dir
+
         if side == "LONG":
             if flow_dir not in ("LONG_ONLY", "STRONG_BUY"):
                 logger.info("[DIRECTIONAL GATE VETO] %s LONG rejected by flow_dir=%s (must be LONG_ONLY or STRONG_BUY)", symbol, flow_dir)
+                return None
+            if prev_flow not in ("LONG_ONLY", "STRONG_BUY"):
+                logger.info("[ORDERFLOW PERSISTENCE VETO] %s LONG flow=%s is first-bar spike (prev=%s). Needs 2 consecutive cycles confirmation.",
+                            symbol, flow_dir, prev_flow)
                 return None
             is_flow_confirmed = True
         elif side == "SHORT":
             if flow_dir not in ("SHORT_ONLY", "STRONG_SELL"):
                 logger.info("[DIRECTIONAL GATE VETO] %s SHORT rejected by flow_dir=%s (must be SHORT_ONLY or STRONG_SELL)", symbol, flow_dir)
+                return None
+            if prev_flow not in ("SHORT_ONLY", "STRONG_SELL"):
+                logger.info("[ORDERFLOW PERSISTENCE VETO] %s SHORT flow=%s is first-bar spike (prev=%s). Needs 2 consecutive cycles confirmation.",
+                            symbol, flow_dir, prev_flow)
                 return None
             is_flow_confirmed = True
         else:
@@ -577,6 +635,10 @@ class AutonomousMarketScanner:
         tv_link = f"https://www.tradingview.com/chart/?symbol=BYBIT:{sym}.P"
         trade_link = f"https://www.bybit.com/trade/usdt/{sym}"
 
+        flow_status_label = "Confirmed" if setup.get("is_flow_confirmed") else "Permissive"
+        flow_status_icon = "✅" if setup.get("is_flow_confirmed") else "⚠️"
+        flow_dir_str = str(setup.get("flow_dir", "UNKNOWN"))
+
         msg = (
             f"🤖 <b>[AUTONOMOUS SCANNER] {icon} {setup['side']} │ {sym}</b>\n\n"
             f"📋 <b>TRADE PLAN (MTF IFVG-PRO + GOLDEN SCALP)</b>\n"
@@ -589,7 +651,7 @@ class AutonomousMarketScanner:
             f"   • Macro: 1h EMA 20/50 Trend Aligned ✅\n"
             f"   • Trigger: 15m IFVG Inversion (Gap >= 0.5 ATR) ✅\n"
             f"   • Floor SL: Anti-Wick Floor >= 1.0% ✅\n"
-            f"   • Orderflow: {"Confirmed" if setup.get("is_flow_confirmed") else "Permissive"} ({setup['flow_dir']}) {"✅" if setup.get("is_flow_confirmed") else "⚠️"}\n\n"
+            f"   • Orderflow: {flow_status_label} ({flow_dir_str}) {flow_status_icon}\n\n"
             f"🔗 <a href='{tv_link}'>TradingView Chart</a> │ <a href='{trade_link}'>Bybit Trade</a>\n"
             f"<i>Execution: Paper Mainnet Gateway (Real Price Matching)</i>"
         )

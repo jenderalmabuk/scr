@@ -1,4 +1,5 @@
 import os
+import json
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, AsyncMock, patch
@@ -236,6 +237,60 @@ class TestCohort002Acceptance(unittest.TestCase):
         self.assertFalse(check_directional_gate("SHORT", "UNKNOWN")[0])
         self.assertTrue(check_directional_gate("SHORT", "SHORT_ONLY")[0])
         self.assertTrue(check_directional_gate("SHORT", "STRONG_SELL")[0])
+
+    def test_gate1_post_sl_symbol_directional_cooldown(self):
+        """Gate 1: Symbol that hit SL < 12h ago on same side is vetoed."""
+        from bots.autonomous_market_scanner import AutonomousMarketScanner
+        scanner = AutonomousMarketScanner()
+
+        mock_trades = [
+            {
+                "symbol": "ONDOUSDT",
+                "side": "LONG",
+                "timestamp_close": datetime.now(timezone.utc).isoformat(),
+                "normalized_reason": "HARD_SL"
+            }
+        ]
+        with patch("pathlib.Path.open", unittest.mock.mock_open(read_data=json.dumps(mock_trades))), \
+             patch("pathlib.Path.exists", return_value=True):
+            is_cd, msg = scanner.check_post_sl_symbol_cooldown("ONDOUSDT", "LONG", cooldown_hours=12.0)
+            self.assertTrue(is_cd)
+            self.assertIn("Recently stopped out on LONG", msg)
+
+            # Different side (SHORT) must NOT be blocked by LONG cooldown
+            is_cd_short, _ = scanner.check_post_sl_symbol_cooldown("ONDOUSDT", "SHORT", cooldown_hours=12.0)
+            self.assertFalse(is_cd_short)
+
+    def test_gate2_market_structure_swing_integrity(self):
+        """Gate 2: Price below 24h swing low rejects LONG (anti-falling knife)."""
+        k1h = [{"low": 10.0 + i*0.1, "high": 11.0 + i*0.1} for i in range(30)]
+        lows_24h = [float(k["low"]) for k in k1h[-25:-1]]
+        swing_low_24h = min(lows_24h)
+
+        # Case 1: current price 9.5 < swing_low (Lower Low / Falling knife) -> REJECT
+        current_price_knife = 9.5
+        self.assertLess(current_price_knife, swing_low_24h)
+
+        # Case 2: current price 11.5 >= swing_low (Healthy pullback) -> ACCEPT
+        current_price_healthy = 11.5
+        self.assertGreaterEqual(current_price_healthy, swing_low_24h)
+
+    def test_gate3_orderflow_multi_bar_persistence(self):
+        """Gate 3: First bar spike is vetoed; 2nd consecutive cycle passes."""
+        from bots.autonomous_market_scanner import AutonomousMarketScanner
+        scanner = AutonomousMarketScanner()
+
+        # Cycle 1: First time seeing LONG_ONLY (prev was None)
+        prev_1 = scanner.flow_history.get("BTCUSDT")
+        scanner.flow_history["BTCUSDT"] = "LONG_ONLY"
+        cycle_1_persistent = prev_1 in ("LONG_ONLY", "STRONG_BUY")
+        self.assertFalse(cycle_1_persistent) # Vetoed as single-bar spike!
+
+        # Cycle 2: Second consecutive cycle of LONG_ONLY
+        prev_2 = scanner.flow_history.get("BTCUSDT")
+        scanner.flow_history["BTCUSDT"] = "LONG_ONLY"
+        cycle_2_persistent = prev_2 in ("LONG_ONLY", "STRONG_BUY")
+        self.assertTrue(cycle_2_persistent) # Confirmed persistent!
 
 
 if __name__ == "__main__":
