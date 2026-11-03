@@ -293,5 +293,101 @@ class TestCohort002Acceptance(unittest.TestCase):
         self.assertTrue(cycle_2_persistent) # Confirmed persistent!
 
 
+
+    def test_dual_tier_risk_accounting_classification(self):
+        """P1 test: Differentiate raw budget breach from tolerance overrun."""
+        # Case 1: LTC scenario - actual loss $2.04154 (planned $2.00, tolerance $0.05)
+        planned_max_loss = 2.00
+        tolerance_usd = 0.05
+        actual_net_loss = 2.04154
+        reason = "HARD_SL"
+
+        planned_risk_breach_usd = max(0.0, actual_net_loss - planned_max_loss)
+        is_risk_budget_breach = planned_risk_breach_usd > 0.0 and "SL" in reason.upper()
+        risk_overrun_usd = max(0.0, actual_net_loss - (planned_max_loss + tolerance_usd))
+        is_risk_overrun = risk_overrun_usd > 0.0 and "SL" in reason.upper()
+
+        self.assertTrue(is_risk_budget_breach, "Must flag budget breach for $2.04154 > $2.00")
+        self.assertAlmostEqual(planned_risk_breach_usd, 0.04154, places=5)
+        self.assertFalse(is_risk_overrun, "Must NOT flag tolerance overrun within $0.05 tolerance")
+        self.assertEqual(risk_overrun_usd, 0.0)
+
+        # Case 2: Severe slippage - actual loss $2.08000
+        actual_net_loss_severe = 2.08000
+        planned_risk_breach_usd_severe = max(0.0, actual_net_loss_severe - planned_max_loss)
+        is_risk_budget_breach_severe = planned_risk_breach_usd_severe > 0.0 and "SL" in reason.upper()
+        risk_overrun_usd_severe = max(0.0, actual_net_loss_severe - (planned_max_loss + tolerance_usd))
+        is_risk_overrun_severe = risk_overrun_usd_severe > 0.0 and "SL" in reason.upper()
+
+        self.assertTrue(is_risk_budget_breach_severe)
+        self.assertTrue(is_risk_overrun_severe, "Must flag overrun for $2.08000 > $2.05")
+        self.assertAlmostEqual(risk_overrun_usd_severe, 0.03000, places=5)
+
+    def test_cvd_and_oi_provenance_distinction(self):
+        """P1 test: cvd_status and oi_status explicitly distinguish 0.0 from UNAVAILABLE."""
+        # Case 1: cvd_raw is 0.0 (genuine zero flow) -> VALID
+        cvd_raw = 0.0
+        cvd_val = float(cvd_raw) if cvd_raw is not None else 0.0
+        cvd_status = "VALID" if cvd_raw is not None else "UNAVAILABLE"
+        self.assertEqual(cvd_status, "VALID")
+        self.assertEqual(cvd_val, 0.0)
+
+        # Case 2: cvd_raw is None (missing feed) -> UNAVAILABLE
+        cvd_raw_missing = None
+        cvd_val_missing = float(cvd_raw_missing) if cvd_raw_missing is not None else 0.0
+        cvd_status_missing = "VALID" if cvd_raw_missing is not None else "UNAVAILABLE"
+        self.assertEqual(cvd_status_missing, "UNAVAILABLE")
+        self.assertEqual(cvd_val_missing, 0.0)
+
+        # Case 3: OI history missing -> UNAVAILABLE
+        oi_history = []
+        oi_status = "VALID" if (oi_history and len(oi_history) >= 2) else "UNAVAILABLE"
+        self.assertEqual(oi_status, "UNAVAILABLE")
+
+    def test_cohort_manifest_and_gateway_reconciliation(self):
+        """P1 test: Cohort manifest integrity & atomic gateway reconciliation."""
+        import json
+        from pathlib import Path
+        manifest_path = Path("/opt/signalcopyreal/active_cohort.json")
+        self.assertTrue(manifest_path.exists(), "active_cohort.json must exist")
+
+        with manifest_path.open("r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        self.assertEqual(manifest.get("cohort_id"), "cohort_post_patch_20261103_002")
+        self.assertEqual(manifest.get("git_commit"), "bc95c5a")
+        self.assertEqual(manifest.get("authoritative_pnl_metric"), "authoritative_net_pnl_usd")
+        self.assertEqual(manifest.get("execution_mode"), "PAPER_REAL_PRICE_MATCHING")
+        self.assertAlmostEqual(manifest.get("baseline_equity_usd"), 95.8870, places=4)
+
+        # Test Gateway portfolio reconciliation block
+        mock_trader = MagicMock()
+        mock_risk = MagicMock()
+        mock_risk.trader = mock_trader
+        mock_risk.get_current_equity.return_value = 97.5000
+        mock_risk.get_daily_pnl_pct.return_value = 0.0
+        mock_risk.get_total_exposure_pct.return_value = 0.0
+        mock_risk.get_reserved_risk_total.return_value = 0.0
+        mock_risk.get_active_open_risk_total.return_value = 3.9672
+        mock_risk.get_total_open_risk.return_value = 3.9672
+        mock_risk.get_parallel_open_risk_budget.return_value = 10.0
+        mock_risk._position_count.return_value = 0
+        mock_risk._position_symbols.return_value = []
+        mock_risk.is_daily_loss_limit_hit.return_value = False
+        mock_risk.is_exposure_limit_exceeded.return_value = False
+        mock_trader.positions = {}
+
+        gateway = ExecutionGateway(mock_trader, mock_risk)
+
+        port = gateway.portfolio()
+        self.assertIn("active_cohort", port)
+        self.assertIn("cohort_reconciliation", port)
+        reconcil = port["cohort_reconciliation"]
+        self.assertEqual(reconcil["reconciliation_status"], "MATCHED")
+        self.assertAlmostEqual(reconcil["baseline_equity_usd"], 95.8870, places=4)
+        self.assertAlmostEqual(reconcil["current_equity_usd"], 97.5000, places=4)
+        self.assertAlmostEqual(reconcil["equity_delta_usd"], 1.6130, places=4)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1876,17 +1876,28 @@ class PaperMainnetTrader:
         pos["qty_remaining"] = 0.0
         pos["qty_closed"] = cur_initial
 
-        # Comprehensive Trade Risk Accounting & Overrun Audit
+        # Comprehensive Trade Risk Accounting & Overrun Audit (Quant Lead Standard)
         planned_max_loss = float(pos.get("actual_risk_usd", pos.get("planned_risk_usd", 2.0)))
         actual_gross_loss = abs(actual_exit - entry) * qty if ((side == "LONG" and actual_exit < entry) or (side == "SHORT" and actual_exit > entry)) else 0.0
         actual_slippage_usd = abs(actual_exit - exit_price) * qty
         actual_net_loss = max(0.0, -realized_net_pnl)
         tolerance_usd = RISK_OVERRUN_TOLERANCE_USD
+        
+        # Dual-Tier Risk Classification:
+        # Tier 1: Raw Budget Breach (any loss > planned_max_loss)
+        planned_risk_breach_usd = max(0.0, actual_net_loss - planned_max_loss)
+        is_risk_budget_breach = planned_risk_breach_usd > 0.0 and "SL" in reason.upper()
+        
+        # Tier 2: Tolerance Overrun (loss > planned + tolerance)
         risk_overrun_usd = max(0.0, actual_net_loss - (planned_max_loss + tolerance_usd))
         is_risk_overrun = risk_overrun_usd > 0.0 and "SL" in reason.upper()
+
         if is_risk_overrun:
-            logger.error("[ALARM] RISK_OVERRUN on %s %s: actual_net_loss=$%.4f > planned=$%.4f (+%.4f overrun)",
+            logger.error("[ALARM] RISK_OVERRUN on %s %s: actual_net_loss=$%.4f > planned=$%.4f (+%.4f overrun past tolerance)",
                          symbol, side, actual_net_loss, planned_max_loss, risk_overrun_usd)
+        elif is_risk_budget_breach:
+            logger.warning("[ALARM] RISK_BUDGET_BREACH on %s %s: actual_net_loss=$%.4f > planned=$%.4f (+%.4f breach within tolerance)",
+                           symbol, side, actual_net_loss, planned_max_loss, planned_risk_breach_usd)
         actual_rr_ladder = [
             round(abs(float(tp) - float(entry)) / risk_per_unit, 3)
             for tp in (pos.get("tp_ladder") or [])
@@ -1960,6 +1971,10 @@ class PaperMainnetTrader:
                 "actual_net_loss": actual_net_loss,
                 "risk_overrun_usd": risk_overrun_usd,
                 "risk_overrun": is_risk_overrun,
+                "planned_risk_breach_usd": planned_risk_breach_usd,
+                "risk_budget_breach": is_risk_budget_breach,
+                "risk_overrun_tolerance_usd": tolerance_usd,
+                "authoritative_net_pnl_usd": realized_net_pnl,
                 "actual_rr_ladder": actual_rr_ladder,
                 "qty_opened": cur_initial,
                 "qty_closed": cur_initial,
@@ -2033,6 +2048,9 @@ class PaperMainnetTrader:
             "actual_net_loss": actual_net_loss,
             "risk_overrun_usd": risk_overrun_usd,
             "risk_overrun": is_risk_overrun,
+            "planned_risk_breach_usd": planned_risk_breach_usd,
+            "risk_budget_breach": is_risk_budget_breach,
+            "authoritative_net_pnl_usd": realized_net_pnl,
             "footer": "Fusion Quantum Dry-Run" if str(pos.get("tag", "")).startswith("fusion_quantum") else "",
         }
 

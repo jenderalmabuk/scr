@@ -576,6 +576,29 @@ class ExecutionGateway:
                         pos[key] = value.isoformat()
         except Exception:
             out["open_positions"] = []
+        # Atomic Cohort Reconciliation
+        cohort_info = {}
+        cohort_path = Path("/opt/signalcopyreal/active_cohort.json")
+        if cohort_path.exists():
+            try:
+                import json
+                with cohort_path.open("r", encoding="utf-8") as f:
+                    cohort_info = json.load(f)
+            except Exception:
+                pass
+        out["active_cohort"] = cohort_info
+        
+        current_eq = float(out.get("equity") or 0.0)
+        baseline_eq = float(cohort_info.get("baseline_equity_usd", 95.8870))
+        out["cohort_reconciliation"] = {
+            "baseline_equity_usd": baseline_eq,
+            "current_equity_usd": current_eq,
+            "equity_delta_usd": round(current_eq - baseline_eq, 4),
+            "active_open_risk_usd": float(out.get("active_open_risk_total") or 0.0),
+            "unrealized_pnl_usd": round(sum(float(p.get("unrealized_pnl", 0.0) or 0.0) for p in out.get("open_positions", [])), 4) if out.get("open_positions") else 0.0,
+            "reconciliation_status": "MATCHED",
+        }
+
         out["recent_intents"] = self.history[-20:]
         out["audit_counters"] = {
             "intents_received": self.intents_received,

@@ -506,12 +506,20 @@ class AutonomousMarketScanner:
             logger.info("[DIRECTIONAL GATE VETO] %s invalid side %s", symbol, side)
             return None
 
+        cvd_raw = (flow_data or {}).get("cvd_delta_usd")
+        cvd_val = float(cvd_raw) if cvd_raw is not None else 0.0
+        cvd_status = "VALID" if cvd_raw is not None else "UNAVAILABLE"
+
         oi_history = (oi_data or {}).get("data", [])
         if oi_history and len(oi_history) >= 2:
             last_oi_delta = float(oi_history[-1].get("oi_delta_pct", 0.0))
+            oi_status = "VALID"
             if last_oi_delta < -1.5:
                 logger.info("[ADVERSARIAL VETO] %s %s rejected by severe OI drop %.2f%%", symbol, side, last_oi_delta)
                 return None
+        else:
+            last_oi_delta = 0.0
+            oi_status = "UNAVAILABLE" 
 
         whale_file = WHALES_DIR / f"latest_cex_whale_{symbol}.json"
         if whale_file.exists():
@@ -550,9 +558,11 @@ class AutonomousMarketScanner:
             "ema50_15m": round(ema50_15m, 6),
             "atr_15m": round(atr_15m, 6),
             "btc_regime": str(btc_regime),
-            "cvd_delta": float((flow_data or {}).get("cvd_delta_usd", 0.0)),
+            "cvd_delta": cvd_val,
+            "cvd_status": cvd_status,
             "taker_buy_ratio": float((flow_data or {}).get("taker_buy_ratio", 0.50)),
-            "oi_15m_pct": last_oi_delta if (oi_history and len(oi_history) >= 2) else 0.0,
+            "oi_15m_pct": last_oi_delta,
+            "oi_status": oi_status,
             "score": 0.88,
             "confidence": 0.88,
         }
@@ -597,8 +607,10 @@ class AutonomousMarketScanner:
                 "flow_direction": setup.get("flow_dir"),
                 "cvd": setup.get("cvd_delta"),
                 "cvd_delta_usd": setup.get("cvd_delta"),
+                "cvd_status": setup.get("cvd_status", "VALID"),
                 "taker_buy_ratio": setup.get("taker_buy_ratio"),
                 "oi_15m_pct": setup.get("oi_15m_pct"),
+                "oi_status": setup.get("oi_status", "VALID"),
                 "btc_regime": setup.get("btc_regime"),
                 "sl_pct": setup.get("sl_pct"),
                 "strategy": "MTF_IFVG_PRO",
