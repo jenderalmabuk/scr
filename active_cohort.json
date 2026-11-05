@@ -2,7 +2,7 @@
   "cohort_id": "cohort_post_patch_20261103_002",
   "status": "ACTIVE_FORWARD_TEST",
   "start_timestamp_utc": "2026-11-03T01:43:45Z",
-  "git_commit": "a32cda1",
+  "git_commit": "c49c842",
   "baseline_equity_usd": 95.887,
   "cohort_close_previous": {
     "previous_cohort_id": "cohort_initial_20261029_001",
@@ -37,5 +37,9 @@
     "oi_status_tracked": true,
     "immutable_decision_snapshot": true,
     "symmetrical_entry_guard": true
-  }
+  },
+  "dynamic_exits_active": true,
+  "profit_lock_at_1r": true,
+  "symmetrical_btc_guard": true,
+  "relative_strength_filter": true
 }
