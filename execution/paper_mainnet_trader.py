@@ -148,8 +148,13 @@ logger = logging.getLogger("gateway.paper")
 # ── Dynamic exit layer (ported from FusionXomegabot binance_testnet_trader) ──
 # Defaults mirror signal_copy/execution_config.py; read fresh each call so env
 # changes and test patch.dict overrides take effect without module reload.
-def _dyn_env_bool(name: str, default: str = "true") -> bool:
-    return os.getenv(name, default).lower() in ("1", "true", "yes")
+def _dyn_env_bool(name: str, default: Any = True) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        if isinstance(default, bool):
+            return default
+        val = str(default)
+    return str(val).lower() in ("1", "true", "yes", "on")
 
 
 def _dyn_env_float(name: str, default: float) -> float:
@@ -1378,7 +1383,7 @@ class PaperMainnetTrader:
         """Master gate: paper-only. Real money hard-disabled."""
         if os.getenv("REAL_MONEY", "false").lower() == "true":
             return False
-        return _dyn_env_bool("SIGNALCOPY_PAPER_DYNAMIC_EXIT", "false")
+        return _dyn_env_bool("SIGNALCOPY_PAPER_DYNAMIC_EXIT", "true")
 
     def _config_bool(self, key: str, default: bool = False) -> bool:
         val = os.getenv(key, "").lower()
@@ -1556,16 +1561,20 @@ class PaperMainnetTrader:
                     )
 
         # ── 3. PROFIT_LOCK — move SL to breakeven+buffer once in profit ─────
-        # TP1-GATED: Only lock after TP1 hit to avoid premature locks from volatility spikes
-        # Buffer = max(entry*BUFFER_PCT/100, risk_distance*0.15) — old bot exact.
+        # Locks profit once TP1 hit OR excursion reaches >= 0.85R (to prevent +1.0R trades from turning into -1.0R loss)
         tp_hit_count = len(pos.get("tp_hit", []))
+        original_sl = float(pos.get("provider_sl_original") or sl or entry)
+        risk_distance = abs(entry - original_sl)
+        current_r = ((mark - entry) / risk_distance) if side == "LONG" else ((entry - mark) / risk_distance) if risk_distance > 0 else 0.0
+        mfe_r = float(scratch_excursion.get("max_favorable_r", 0.0))
+        reach_1r = (current_r >= 0.85 or mfe_r >= 0.95) and _dyn_env_bool("PROFIT_LOCK_AT_1R_ENABLED", "true")
+        min_lock_mins = _dyn_env_int("PROFIT_LOCK_MIN_MINUTES", 5)
+
         if (not pos.get("locked_profit")
-                and hold_min > _dyn_env_int("PROFIT_LOCK_MIN_MINUTES", 15)
-                and tp_hit_count >= 1):  # ✅ TP1-gated: confirmed profit only
-            original_sl = float(pos.get("provider_sl_original") or sl or entry)
-            risk_distance = abs(entry - original_sl)
-            fixed_buffer = entry * (_dyn_env_float("PROFIT_LOCK_BUFFER_PCT", 0.3) / 100.0)
-            buffer = max(fixed_buffer, risk_distance * 0.15)
+                and hold_min >= min_lock_mins
+                and (tp_hit_count >= 1 or reach_1r)):
+            fixed_buffer = entry * (_dyn_env_float("PROFIT_LOCK_BUFFER_PCT", 0.2) / 100.0)
+            buffer = max(fixed_buffer, risk_distance * 0.10)
             if side == "LONG":
                 new_sl = max(sl, entry + buffer)
                 if new_sl >= mark * 0.998:   # too tight — would fire instantly
@@ -1582,8 +1591,8 @@ class PaperMainnetTrader:
                 pos["profit_lock_at"] = now.isoformat()
                 pos["profit_lock_buffer"] = buffer
                 _persist_positions(self.positions)
-                logger.info("[PROFIT_LOCK] %s %s | new_sl=%.6g | buffer=%.6g | hold=%.0fmin",
-                            side, symbol, new_sl, buffer, hold_min)
+                logger.info("[PROFIT_LOCK] %s %s | new_sl=%.6g | buffer=%.6g | hold=%.0fmin | trigger=%s",
+                            side, symbol, new_sl, buffer, hold_min, "TP1_HIT" if tp_hit_count >= 1 else "REACH_1R")
 
         # ── 4. TRAILING — only after profit lock + 10min (old bot two-phase) ─
         if (pos.get("trail_active") or (pos.get("locked_profit") and hold_min > 10.0)) and _dyn_env_bool("TRAIL_SL_ENABLED", default=True):

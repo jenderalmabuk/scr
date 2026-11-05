@@ -388,6 +388,42 @@ class TestCohort002Acceptance(unittest.TestCase):
         self.assertAlmostEqual(reconcil["wallet_balance_usd"], 97.5000, places=4)
         self.assertEqual(reconcil["reconciliation_delta_usd"], 0.0)
 
+    def test_dynamic_exit_enabled_by_default_in_paper(self):
+        """Verify dynamic exits default to enabled in paper mode for risk protection."""
+        trader = self._create_trader()
+        self.assertTrue(trader._dyn_enabled(), "Dynamic exit must default to True in paper mode")
+
+    def test_profit_lock_at_1r_moves_sl_to_breakeven(self):
+        """Verify position with MFE >= 0.95R or current R >= 0.85R triggers profit lock to breakeven."""
+        trader = self._create_trader()
+        from datetime import datetime, timezone, timedelta
+        opened_at = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        
+        pos = {
+            "symbol": "ZECUSDT_LOCK_TEST",
+            "side": "LONG",
+            "entry_price": 100.0,
+            "sl_price": 99.0, # risk_distance = 1.0 (1%)
+            "provider_sl_original": 99.0,
+            "status": "OPEN",
+            "qty": 1.0,
+            "opened_at": opened_at,
+            "tp_hit": [],
+            "locked_profit": False,
+        }
+        trader.positions["ZECUSDT_LOCK_TEST"] = pos
+        
+        # Mark price is 100.90 (+0.90R)
+        import asyncio
+        loop = asyncio.new_event_loop()
+        res = loop.run_until_complete(trader._apply_dynamic_exits("ZECUSDT_LOCK_TEST", pos, 100.90))
+        loop.close()
+        
+        self.assertFalse(res) # position not closed
+        self.assertTrue(pos.get("locked_profit"))
+        self.assertGreater(pos.get("sl_price"), 100.0) # SL moved ABOVE entry (breakeven + buffer)
+        self.assertEqual(pos.get("sl_kind"), "BREAKEVEN")
+
 
 if __name__ == "__main__":
     unittest.main()

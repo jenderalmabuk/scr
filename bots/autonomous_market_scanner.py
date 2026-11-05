@@ -312,7 +312,7 @@ class AutonomousMarketScanner:
             logger.warning("[COOLDOWN] Check failed for %s: %s", symbol, err)
         return False, "ok"
 
-    async def analyze_pair(self, symbol: str, btc_regime: str) -> Optional[Dict[str, Any]]:
+    async def analyze_pair(self, symbol: str, btc_regime: str, btc_4h_change: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         Evaluate pair using Multi-Timeframe Trend (1h) + 15m IFVG-Pro Engine.
         """
@@ -335,11 +335,15 @@ class AutonomousMarketScanner:
         if not is_bullish_1h and not is_bearish_1h:
             return None
 
-        # ── 2. Filter 1: Macro BTC Guard ─────────────────────────────────
+        # ── 2. Filter 1: Symmetrical Macro BTC Guard ─────────────────────
         # Block SHORTs if BTC is strongly bullish / risk on
+        # Block LONGs if BTC is strongly bearish / risk off (except PAXG safe haven)
         btc_upper = str(btc_regime).upper()
         if is_bearish_1h and btc_upper in ("BULLISH", "RISK_ON"):
             logger.debug("[FILTER 1 GUARD] %s Bearish rejected because BTC is %s", symbol, btc_regime)
+            return None
+        if is_bullish_1h and btc_upper in ("BEARISH", "RISK_OFF") and symbol != "PAXGUSDT":
+            logger.info("[FILTER 1 GUARD] %s Bullish rejected because BTC is in %s (Risk-Off)", symbol, btc_regime)
             return None
 
         # ── 3. Timeframe Micro (15m) Indicator Calculations ──────────────
@@ -413,6 +417,15 @@ class AutonomousMarketScanner:
         if not side:
             return None
 
+        # ── Gate: Relative Strength (RS) vs BTC for Altcoins ──────────────
+        if symbol not in ("BTCUSDT", "PAXGUSDT") and side == "LONG":
+            if btc_4h_change is not None and len(closes_1h) >= 5:
+                alt_4h_change = (closes_1h[-1] - closes_1h[-5]) / closes_1h[-5]
+                if alt_4h_change < btc_4h_change:
+                    logger.info("[RS GUARD] %s LONG rejected: Alt 4h change %.2f%% is weaker than BTC 4h change %.2f%%",
+                                symbol, alt_4h_change * 100, btc_4h_change * 100)
+                    return None
+
         # ── Gate 1: Post-SL Symbol Directional Cooldown (12 Hours) ────────
         is_sl_cd, cd_msg = self.check_post_sl_symbol_cooldown(symbol, side, cooldown_hours=12.0)
         if is_sl_cd:
@@ -445,8 +458,8 @@ class AutonomousMarketScanner:
             max_sl_dist = entry * 0.035
             sl_dist = max(min_sl_dist, min(max_sl_dist, raw_sl_dist))
             sl = round(entry - sl_dist, 6)
-            tp1 = round(entry + (1.5 * sl_dist), 6)  # TP1: 1.5R (75% Realize Profit)
-            tp2 = round(entry + (3.0 * sl_dist), 6)  # TP2: 3.0R (25% Runner Target)
+            tp1 = round(entry + (1.0 * sl_dist), 6)  # TP1: 1.0R (50% Realize Profit + Move SL to BE)
+            tp2 = round(entry + (2.0 * sl_dist), 6)  # TP2: 2.0R (50% Runner Target)
         else:
             swing_high = max(highs_15m[-6:])
             raw_sl_dist = max(swing_high - entry, 1.2 * atr_15m)
@@ -454,8 +467,8 @@ class AutonomousMarketScanner:
             max_sl_dist = entry * 0.035
             sl_dist = max(min_sl_dist, min(max_sl_dist, raw_sl_dist))
             sl = round(entry + sl_dist, 6)
-            tp1 = round(entry - (1.5 * sl_dist), 6)  # TP1: 1.5R
-            tp2 = round(entry - (3.0 * sl_dist), 6)  # TP2: 3.0R
+            tp1 = round(entry - (1.0 * sl_dist), 6)  # TP1: 1.0R
+            tp2 = round(entry - (2.0 * sl_dist), 6)  # TP2: 2.0R
 
         sl_pct = (sl_dist / entry) * 100.0
 
@@ -542,8 +555,8 @@ class AutonomousMarketScanner:
             "sl": sl,
             "tp1": tp1,
             "tp2": tp2,
-            "rr1": 1.5,
-            "rr2": 3.0,
+            "rr1": 1.0,
+            "rr2": 2.0,
             "sl_pct": sl_pct,
             "rsi_15m": round(rsi_15m, 1),
             "flow_dir": flow_dir,
@@ -615,10 +628,10 @@ class AutonomousMarketScanner:
                 "sl_pct": setup.get("sl_pct"),
                 "strategy": "MTF_IFVG_PRO",
                 "tp_plan": "GOLDEN_SCALP",
-                "rr1": 1.5,
-                "rr2": 3.0,
-                "tp1_pct": 0.75,
-                "runner_pct": 0.25,
+                "rr1": 1.0,
+                "rr2": 2.0,
+                "tp1_pct": 0.50,
+                "runner_pct": 0.50,
                 "score": 0.88,
                 "confidence": 0.88,
             }
@@ -697,7 +710,19 @@ class AutonomousMarketScanner:
 
         btc_info = await self.get_btc_regime()
         btc_mode = btc_info.get("mode", "NEUTRAL")
-        logger.info("[MACRO] BTC Regime: %s | Active Positions: %d/%d", btc_mode, open_count, MAX_CONCURRENT_POSITIONS)
+
+        # Compute BTC 4h change for Relative Strength comparisons
+        btc_4h_change = None
+        try:
+            btc_k1h = await self.fetch_klines("BTCUSDT", tf="1h", limit=10)
+            if len(btc_k1h) >= 5:
+                btc_closes = [float(k["close"]) for k in btc_k1h]
+                btc_4h_change = (btc_closes[-1] - btc_closes[-5]) / btc_closes[-5]
+        except Exception as e:
+            logger.warning("[MACRO] Failed to calculate BTC 4h change: %s", e)
+
+        logger.info("[MACRO] BTC Regime: %s (4h Change: %s) | Active Positions: %d/%d",
+                    btc_mode, f"{btc_4h_change*100:+.2f}%" if btc_4h_change is not None else "N/A", open_count, MAX_CONCURRENT_POSITIONS)
 
         universe = await self.get_universe()
         logger.info("[UNIVERSE] Scanning %d liquid pairs...", len(universe))
@@ -712,7 +737,7 @@ class AutonomousMarketScanner:
             if time.time() - self.last_scanned.get(symbol, 0) < 900:
                 continue
 
-            setup = await self.analyze_pair(symbol, btc_mode)
+            setup = await self.analyze_pair(symbol, btc_mode, btc_4h_change)
             if setup:
                 # Directional Concentration Guard
                 if symbol not in NON_CORRELATED_PAIRS:

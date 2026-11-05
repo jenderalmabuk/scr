@@ -507,7 +507,7 @@ def evaluate_scratch_exit_gate(
     # it is dead capital that must be scratched to free up portfolio capacity.
     tf = infer_timeframe(position)
     tf_minutes = TF_MAP.get(tf, 15)
-    default_zombie_min = 1440.0 if tf_minutes >= 60 else 720.0
+    default_zombie_min = 1440.0 if tf_minutes >= 60 else 180.0
     zombie_timeout = _safe_float(os.getenv('SCRATCH_ZOMBIE_TIMEOUT_MIN'), default_zombie_min)
 
     is_zombie = (
